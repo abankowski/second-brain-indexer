@@ -1,6 +1,6 @@
 # GitHub CI/CD
 
-CI runs on pull requests and pushes to `main` using the repository-pinned Rust
+CI runs on pull requests and pushes to `master` using the repository-pinned Rust
 toolchain (`1.85.0`). It checks formatting, strict Clippy, and the full
 single-worker test suite; this includes the TCP adapter tests.
 
