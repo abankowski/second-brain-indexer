@@ -1,0 +1,40 @@
+[server]
+bind = "127.0.0.1:9184"
+request_timeout_seconds = 10
+
+[polling]
+enabled = true
+interval_seconds = 900
+run_on_start = false
+
+[state]
+database_path = "/var/lib/second-brain-indexer/indexer-state.db"
+lock_path = "/var/lib/second-brain-indexer/indexer.lock"
+lease_seconds = 60
+
+[mcp]
+transport = "streamable-http"
+endpoint = "http://127.0.0.1:9183/mcp"
+request_timeout_seconds = 30
+batch_size = 128
+bearer_token_env = "MCP_MEMORY_TOKEN"
+
+[embedding]
+model = "target-compatible-384-dimension-model"
+dimensions = 384
+max_input_chars = 24000
+max_input_tokens = 8192
+openai_base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[representation]
+version = "entity-v1"
+taxonomy_version = "1.0"
+
+[retry]
+max_attempts = 5
+base_delay_ms = 500
+max_delay_ms = 30000
+
+[api]
+idempotency_ttl_hours = 24

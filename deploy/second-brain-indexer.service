@@ -1,0 +1,23 @@
+[Unit]
+Description=Second Brain Indexer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=second-brain-indexer
+Group=second-brain-indexer
+ExecStart=/usr/local/bin/second-brain-indexer --config /etc/second-brain-indexer/config.toml
+EnvironmentFile=/etc/second-brain-indexer/secrets.env
+Restart=on-failure
+RestartSec=5
+StateDirectory=second-brain-indexer
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/second-brain-indexer
+
+[Install]
+WantedBy=multi-user.target

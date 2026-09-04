@@ -1,0 +1,83 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment whose protected secrets and approvals apply
+        required: true
+        type: environment
+      release_tag:
+        description: Existing git tag to build and deploy (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build release artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out requested tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Package release
+        run: tar -czf second-brain-indexer-${{ inputs.release_tag }}-x86_64-unknown-linux-gnu.tar.gz -C target/release second-brain-indexer
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: second-brain-indexer-${{ inputs.release_tag }}
+          path: second-brain-indexer-${{ inputs.release_tag }}-x86_64-unknown-linux-gnu.tar.gz
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy through environment endpoint
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: second-brain-indexer-${{ inputs.release_tag }}
+
+      - name: Validate deployment configuration
+        env:
+          DEPLOY_URL: ${{ secrets.DEPLOY_URL }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          test -n "$DEPLOY_URL" || { echo "DEPLOY_URL is required in the selected GitHub environment" >&2; exit 1; }
+          test -n "$DEPLOY_TOKEN" || { echo "DEPLOY_TOKEN is required in the selected GitHub environment" >&2; exit 1; }
+          case "$DEPLOY_URL" in
+            https://*) ;;
+            *) echo "DEPLOY_URL must use HTTPS" >&2; exit 1 ;;
+          esac
+
+      - name: Upload artifact to deployment endpoint
+        env:
+          DEPLOY_URL: ${{ secrets.DEPLOY_URL }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          archive="second-brain-indexer-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail-with-body --proto '=https' --tlsv1.2 \
+            --retry 2 --silent --show-error \
+            --header "Authorization: Bearer ${DEPLOY_TOKEN}" \
+            --header "X-Release-Tag: ${RELEASE_TAG}" \
+            --upload-file "$archive" \
+            "${DEPLOY_URL%/}/deploy"
