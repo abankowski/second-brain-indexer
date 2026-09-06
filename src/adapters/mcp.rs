@@ -198,7 +198,7 @@ impl McpMemoryPort for StreamableHttpMcpAdapter {
                 .await?,
         )?;
         let failed = payload
-            .failed
+            .errors
             .into_iter()
             .map(|failure| {
                 Ok(BatchWriteFailure {
@@ -208,6 +208,9 @@ impl McpMemoryPort for StreamableHttpMcpAdapter {
                 })
             })
             .collect::<Result<Vec<_>, McpError>>()?;
+        if payload.failed != u32::try_from(failed.len()).map_err(|_| McpError::InvalidResponse)? {
+            return Err(McpError::InvalidResponse);
+        }
         Ok(BatchWriteResult {
             upserted: payload.upserted,
             failed,
@@ -418,14 +421,16 @@ struct VectorWriteDto<'a> {
 #[derive(Deserialize)]
 struct BatchWritePayload {
     upserted: u32,
+    failed: u32,
     #[serde(default)]
-    failed: Vec<BatchWriteFailureDto>,
+    errors: Vec<BatchWriteFailureDto>,
 }
 
 #[derive(Deserialize)]
 struct BatchWriteFailureDto {
     #[serde(rename = "entityName")]
     entity_name: String,
+    #[serde(rename = "error")]
     code: String,
 }
 

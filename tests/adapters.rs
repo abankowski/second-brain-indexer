@@ -117,7 +117,7 @@ async fn mcp_handler(
                     "relations": [],
                     "complete": true,
                 }),
-                Some("vector_batch_upsert") => json!({"upserted": 1, "failed": []}),
+                Some("vector_batch_upsert") => json!({"upserted": 1, "failed": 0, "errors": []}),
                 Some("vector_delete_embedding") => json!({}),
                 Some("vector_store_stats") => json!({"dims": 384}),
                 _ => json!({}),
