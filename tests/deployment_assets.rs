@@ -13,6 +13,10 @@ fn deployment_assets_keep_the_indexer_private_and_preserve_the_indexer_prefix() 
     assert!(nginx.contains("proxy_pass http://127.0.0.1:9184;"));
     assert!(!nginx.contains("proxy_pass http://127.0.0.1:9184/;"));
     assert!(nginx.contains("limit_req zone=indexer_api"));
+
+    let readme = read("README.md");
+    assert!(readme.contains("limit_req_zone $binary_remote_addr zone=indexer_api:10m rate=10r/m;"));
+    assert!(readme.contains("/etc/nginx/conf.d/second-brain-indexer-rate-limit.conf"));
 }
 
 #[test]

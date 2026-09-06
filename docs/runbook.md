@@ -13,6 +13,16 @@ OPENAI_API_KEY=replace-with-openai-key
 
 Never put either value in TOML, systemd unit text, nginx, Git, logs, or a support ticket.
 
+## Nginx rate-limit zone
+
+The supplied nginx fragment uses `limit_req zone=indexer_api`. Define that zone once in nginx's `http` scope; on Debian/Ubuntu, create `/etc/nginx/conf.d/second-brain-indexer-rate-limit.conf` with:
+
+```nginx
+limit_req_zone $binary_remote_addr zone=indexer_api:10m rate=10r/m;
+```
+
+The `:10m` shared-memory size is required. Do not place `limit_req_zone` inside the TLS `server` block or an `/indexer/` `location` block. Validate with `sudo nginx -t` before reloading nginx.
+
 ## Preflight
 
 Run these checks before installation or an upgrade. They do not alter MCP graph or vector data.

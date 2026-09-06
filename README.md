@@ -170,6 +170,20 @@ sudo journalctl -u second-brain-indexer -n 100 --no-pager
 
 Copy [`deploy/nginx-second-brain-indexer.conf`](deploy/nginx-second-brain-indexer.conf), replace the hostname and add TLS plus authentication. The service listens only on `127.0.0.1:9184`; do not expose that port directly.
 
+Before enabling the `/indexer/` location, define its rate-limit zone **once** in nginx's `http` scope. On Debian/Ubuntu, a file in `/etc/nginx/conf.d/` is included from that scope:
+
+```text
+sudoedit /etc/nginx/conf.d/second-brain-indexer-rate-limit.conf
+```
+
+Put exactly this line in that file (the `:10m` is required):
+
+```nginx
+limit_req_zone $binary_remote_addr zone=indexer_api:10m rate=10r/m;
+```
+
+Do not put `limit_req_zone` inside the `server` or `location` block. The supplied `/indexer/` fragment uses that allocation with `limit_req zone=indexer_api burst=20 nodelay;`.
+
 Check and reload nginx (same in bash and fish):
 
 ```text
@@ -204,6 +218,7 @@ Deployment is manual: open **Actions → Deploy**, choose the protected environm
 |---|---|
 | Service is not ready | `journalctl`; token file ownership/mode; MCP endpoint reachability; 384-dimension configuration. |
 | `502 Bad Gateway` from nginx | `systemctl status second-brain-indexer`; nginx prefix config; local listener on `127.0.0.1:9184`. |
+| `zero size shared memory zone "indexer_api"` from nginx | Create `/etc/nginx/conf.d/second-brain-indexer-rate-limit.conf` in the `http` scope with `limit_req_zone $binary_remote_addr zone=indexer_api:10m rate=10r/m;`, then rerun `sudo nginx -t`. |
 | `401` from the indexer | nginx/auth-proxy configuration, not the Rust service. |
 | No vectors are deleted | Expected unless MCP provides an explicit complete-read proof. |
 | Model/dimension mismatch | Prepare the MCP vector store externally first, then update indexer config and run a full scan. |
