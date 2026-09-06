@@ -94,7 +94,7 @@
 ### Task 5: Operational documentation and Second Brain skill guidance
 
 **Files:**
-- Modify: `README.md`, `deploy/config.toml.example`, `deploy/nginx.conf.example`, `tests/deployment_assets.rs`
+- Modify: `README.md`, `deploy/config.toml.example`, `deploy/nginx-second-brain-indexer.conf`, `tests/deployment_assets.rs`
 - Modify: `/Users/abankowski/.codex/skills/second-brain-memory/SKILL.md` only after reading its instructions and validating its package rules.
 - Test: `tests/deployment_assets.rs`
 
