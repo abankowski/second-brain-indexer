@@ -25,18 +25,21 @@ use second_brain_indexer::{
 use sqlx::Row;
 use time::OffsetDateTime;
 use tokio::net::TcpListener;
+use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const IDLE_WORKER_DELAY: Duration = Duration::from_millis(100);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    initialise_logging();
     let config_path = config_path()?;
     let config = load_config(&config_path)?;
+    tracing::info!(
+        event = "configuration_loaded",
+        config_path = %config_path.display(),
+        "configuration accepted"
+    );
     run(config).await
 }
 
@@ -76,6 +79,12 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    tracing::info!(
+        event = "mcp_dimension_verified",
+        mcp_vector_dimension = actual_dimension,
+        configured_dimension = config.embedding.dimensions.get(),
+        "MCP session established and vector-store dimension verified"
+    );
     let embedding = Arc::new(OpenAiEmbeddingAdapter::new(&config.embedding)?);
     let shutdown = Shutdown::new();
     let metrics = Arc::new(Metrics::default());
@@ -126,7 +135,19 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
             }
         })
     });
-    tracing::info!(event = "indexer_started", %address, "second brain indexer started");
+    tracing::info!(
+        event = "indexer_ready",
+        %address,
+        mcp_vector_dimension = actual_dimension,
+        polling_enabled = config.polling.enabled,
+        polling_interval_seconds = config.polling.interval.as_secs(),
+        message = %startup_ready_message(
+            address,
+            actual_dimension,
+            config.polling.enabled,
+            config.polling.interval,
+        ),
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(wait_for_shutdown(shutdown.clone()))
         .await?;
@@ -136,6 +157,49 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         task.abort();
     }
     Ok(())
+}
+
+fn initialise_logging() {
+    let filter = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|value| EnvFilter::try_new(value).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
+    match log_format(std::env::var("INDEXER_LOG_FORMAT").ok().as_deref()) {
+        LogFormat::Text => tracing_subscriber::fmt().with_env_filter(filter).init(),
+        LogFormat::Json => tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .init(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
+fn log_format(value: Option<&str>) -> LogFormat {
+    match value {
+        Some("json") => LogFormat::Json,
+        _ => LogFormat::Text,
+    }
+}
+
+fn startup_ready_message(
+    address: std::net::SocketAddr,
+    dimension: u32,
+    polling_enabled: bool,
+    polling_interval: Duration,
+) -> String {
+    let polling = if polling_enabled {
+        format!("polling enabled every {}s", polling_interval.as_secs())
+    } else {
+        "polling disabled".to_owned()
+    };
+    format!(
+        "indexer ready: listening on {address}; MCP vector store dimension {dimension}; {polling}"
+    )
 }
 
 async fn wait_for_shutdown(shutdown: Shutdown) {
@@ -320,4 +384,27 @@ fn run_view(row: sqlx::sqlite::SqliteRow) -> Result<RunView, HttpDependencyError
         entities_deleted: count("entities_deleted")?,
         entities_failed: count("entities_failed")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, time::Duration};
+
+    use super::{LogFormat, log_format, startup_ready_message};
+
+    #[test]
+    fn startup_message_reports_listener_dimension_and_polling_state() {
+        let address: SocketAddr = "127.0.0.1:9184".parse().expect("test address is valid");
+
+        assert_eq!(
+            startup_ready_message(address, 384, true, Duration::from_secs(900)),
+            "indexer ready: listening on 127.0.0.1:9184; MCP vector store dimension 384; polling enabled every 900s"
+        );
+    }
+
+    #[test]
+    fn direct_execution_defaults_to_text_and_json_is_opt_in() {
+        assert_eq!(log_format(None), LogFormat::Text);
+        assert_eq!(log_format(Some("json")), LogFormat::Json);
+    }
 }

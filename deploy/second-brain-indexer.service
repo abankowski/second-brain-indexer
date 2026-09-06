@@ -9,6 +9,7 @@ User=second-brain-indexer
 Group=second-brain-indexer
 ExecStart=/usr/local/bin/second-brain-indexer --config /etc/second-brain-indexer/config.toml
 EnvironmentFile=/etc/second-brain-indexer/secrets.env
+Environment=INDEXER_LOG_FORMAT=json
 Restart=on-failure
 RestartSec=5
 StateDirectory=second-brain-indexer

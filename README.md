@@ -97,7 +97,7 @@ set +a
 target/release/second-brain-indexer --config .local/config.toml
 ```
 
-Leave that terminal running. In a second terminal, check readiness without nginx:
+Direct shell runs print readable INFO messages to standard error: configuration accepted, MCP session/dimension verification, then `indexer ready` with its listener and polling state. This startup probe does **not** list MCP tools, read the graph, create embeddings, or write vectors. Leave that terminal running. In a second terminal, check readiness without nginx:
 
 ```text
 curl --fail-with-body http://127.0.0.1:9184/indexer/status
