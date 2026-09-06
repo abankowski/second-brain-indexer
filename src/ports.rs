@@ -174,8 +174,8 @@ pub struct RunCompletion {
 
 #[derive(Debug, Error)]
 pub enum McpError {
-    #[error("MCP transport failed")]
-    Transport,
+    #[error("MCP transport failed: {0}")]
+    Transport(String),
     #[error("MCP authentication failed")]
     Unauthorized,
     #[error("MCP rate limited the request")]

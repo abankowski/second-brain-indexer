@@ -117,7 +117,7 @@ struct FakeMcp {
 impl McpMemoryPort for FakeMcp {
     async fn read_graph(&self) -> Result<GraphSnapshot, McpError> {
         if !self.available {
-            return Err(McpError::Transport);
+            return Err(McpError::Transport("test MCP is unavailable".to_owned()));
         }
         GraphSnapshot::complete(
             vec![GraphEntity {

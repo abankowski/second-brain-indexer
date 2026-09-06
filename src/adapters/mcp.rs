@@ -32,7 +32,12 @@ impl StreamableHttpMcpAdapter {
         let client = Client::builder()
             .timeout(config.request_timeout)
             .build()
-            .map_err(|_| McpError::Transport)?;
+            .map_err(|error| {
+                McpError::Transport(format!(
+                    "could not create HTTP client: {}",
+                    error.without_url()
+                ))
+            })?;
         Ok(Self {
             client,
             endpoint: config.endpoint.clone(),
@@ -116,8 +121,8 @@ impl StreamableHttpMcpAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|_| McpError::Transport)?;
-        parse_mcp_response(response).await
+            .map_err(|error| transport_error(&self.endpoint, error))?;
+        parse_mcp_response(response, &self.endpoint).await
     }
 
     async fn notification_with_session(
@@ -130,7 +135,7 @@ impl StreamableHttpMcpAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|_| McpError::Transport)?;
+            .map_err(|error| transport_error(&self.endpoint, error))?;
         classify_status(response.status())?;
         Ok(())
     }
@@ -229,20 +234,50 @@ impl McpMemoryPort for StreamableHttpMcpAdapter {
     }
 }
 
-async fn parse_mcp_response(response: reqwest::Response) -> Result<McpHttpResponse, McpError> {
+async fn parse_mcp_response(
+    response: reqwest::Response,
+    endpoint: &Url,
+) -> Result<McpHttpResponse, McpError> {
     classify_status(response.status())?;
     let session_id = response
         .headers()
         .get("Mcp-Session-Id")
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
-    let body = response.text().await.map_err(|_| McpError::Transport)?;
+    let body = response
+        .text()
+        .await
+        .map_err(|error| transport_error(endpoint, error))?;
     let json = if body.trim_start().starts_with("data:") {
         parse_sse(&body)?
     } else {
         serde_json::from_str(&body).map_err(|_| McpError::InvalidResponse)?
     };
     Ok(McpHttpResponse { json, session_id })
+}
+
+fn transport_error(endpoint: &Url, error: reqwest::Error) -> McpError {
+    let error = error.without_url();
+    let category = if error.is_timeout() {
+        "timed out while contacting"
+    } else if error.is_connect() {
+        "could not connect to"
+    } else {
+        "request failed for"
+    };
+    McpError::Transport(format!(
+        "{category} MCP endpoint {}: {error}",
+        safe_endpoint(endpoint)
+    ))
+}
+
+fn safe_endpoint(endpoint: &Url) -> String {
+    let mut safe = endpoint.clone();
+    let _ = safe.set_username("");
+    let _ = safe.set_password(None);
+    safe.set_query(None);
+    safe.set_fragment(None);
+    safe.to_string()
 }
 
 fn parse_sse(body: &str) -> Result<Value, McpError> {

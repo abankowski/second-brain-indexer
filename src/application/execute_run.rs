@@ -560,7 +560,7 @@ fn error_kind(error: &EmbeddingError) -> EmbeddingError {
 }
 fn error_kind_mcp(error: &McpError) -> McpError {
     match error {
-        McpError::Transport => McpError::Transport,
+        McpError::Transport(detail) => McpError::Transport(detail.clone()),
         McpError::Unauthorized => McpError::Unauthorized,
         McpError::RateLimited => McpError::RateLimited,
         McpError::Server => McpError::Server,
@@ -574,7 +574,7 @@ fn error_code(error: &ExecuteRunError) -> &'static str {
         | ExecuteRunError::Embedding(EmbeddingError::Unauthorized) => "unauthorized",
         ExecuteRunError::Mcp(McpError::RateLimited)
         | ExecuteRunError::Embedding(EmbeddingError::RateLimited) => "rate_limited",
-        ExecuteRunError::Mcp(McpError::Transport)
+        ExecuteRunError::Mcp(McpError::Transport(_))
         | ExecuteRunError::Embedding(EmbeddingError::Transport) => "transport",
         ExecuteRunError::Mcp(McpError::Server)
         | ExecuteRunError::Embedding(EmbeddingError::Server) => "server",

@@ -11,7 +11,7 @@ pub enum RetryClass {
 
 pub fn classify_mcp(error: &McpError) -> RetryClass {
     match error {
-        McpError::Transport | McpError::RateLimited | McpError::Server => RetryClass::Retryable,
+        McpError::Transport(_) | McpError::RateLimited | McpError::Server => RetryClass::Retryable,
         McpError::Unauthorized | McpError::InvalidResponse => RetryClass::Permanent,
     }
 }

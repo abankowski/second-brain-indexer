@@ -231,6 +231,31 @@ async fn mcp_adapter_keeps_data_but_refuses_deletion_proof_without_explicit_evid
     assert!(matches!(graph.deletion_proof, DeletionProof::Unproven(_)));
 }
 
+#[tokio::test]
+async fn mcp_adapter_connection_failure_names_safe_endpoint_and_cause() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener binds");
+    let address = listener.local_addr().expect("test listener has an address");
+    drop(listener);
+    let endpoint = Url::parse(&format!(
+        "http://{address}/mcp?accidentally-sensitive=not-for-output"
+    ))
+    .expect("test URL is valid");
+    let adapter = StreamableHttpMcpAdapter::new(&mcp_config(endpoint)).expect("adapter builds");
+
+    let error = adapter
+        .vector_dimension()
+        .await
+        .expect_err("closed listener rejects the MCP request");
+    let message = error.to_string();
+
+    assert!(message.contains("could not connect"));
+    assert!(message.contains(&format!("http://{address}/mcp")));
+    assert!(!message.contains("accidentally-sensitive"));
+    assert!(!message.contains("mcp-secret"));
+}
+
 async fn embedding_handler(
     State(requests): State<RecordedRequests>,
     headers: HeaderMap,
