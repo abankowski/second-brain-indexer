@@ -16,16 +16,11 @@ This repository deliberately does not include a production token, TLS certificat
 
 ## Fast path: install on a Debian/Ubuntu VM
 
-Run the following on the VM as a regular sudo-capable user. These commands are for **bash**. Fish equivalents are shown where they differ.
+Run the following on the VM as a regular sudo-capable user. Unless explicitly labelled otherwise, commands are identical in bash and fish.
 
 ### 1. Install system packages
 
-```bash
-sudo apt update
-sudo apt install -y build-essential ca-certificates curl git nginx pkg-config libssl-dev
-```
-
-```fish
+```text
 sudo apt update
 sudo apt install -y build-essential ca-certificates curl git nginx pkg-config libssl-dev
 ```
@@ -64,14 +59,7 @@ All tests should pass before installation. The test suite does not contact your 
 
 ### 4. Create the service account and directories
 
-```bash
-sudo useradd --system --home /var/lib/second-brain-indexer --shell /usr/sbin/nologin second-brain-indexer
-sudo install -d -o second-brain-indexer -g second-brain-indexer -m 0700 /var/lib/second-brain-indexer
-sudo install -d -o root -g root -m 0755 /etc/second-brain-indexer
-sudo install -m 0755 target/release/second-brain-indexer /usr/local/bin/second-brain-indexer
-```
-
-```fish
+```text
 sudo useradd --system --home /var/lib/second-brain-indexer --shell /usr/sbin/nologin second-brain-indexer
 sudo install -d -o second-brain-indexer -g second-brain-indexer -m 0700 /var/lib/second-brain-indexer
 sudo install -d -o root -g root -m 0755 /etc/second-brain-indexer
@@ -80,12 +68,7 @@ sudo install -m 0755 target/release/second-brain-indexer /usr/local/bin/second-b
 
 ### 5. Configure the indexer
 
-```bash
-sudo cp deploy/config.toml.example /etc/second-brain-indexer/config.toml
-sudoedit /etc/second-brain-indexer/config.toml
-```
-
-```fish
+```text
 sudo cp deploy/config.toml.example /etc/second-brain-indexer/config.toml
 sudoedit /etc/second-brain-indexer/config.toml
 ```
@@ -94,13 +77,7 @@ Set the MCP endpoint, model, and dimension. Keep `dimensions = 384` unless the `
 
 Create the secret file:
 
-```bash
-sudoedit /etc/second-brain-indexer/secrets.env
-sudo chown second-brain-indexer:second-brain-indexer /etc/second-brain-indexer/secrets.env
-sudo chmod 0600 /etc/second-brain-indexer/secrets.env
-```
-
-```fish
+```text
 sudoedit /etc/second-brain-indexer/secrets.env
 sudo chown second-brain-indexer:second-brain-indexer /etc/second-brain-indexer/secrets.env
 sudo chmod 0600 /etc/second-brain-indexer/secrets.env
@@ -115,14 +92,7 @@ OPENAI_API_KEY=replace-with-your-openai-key
 
 ### 6. Install and start systemd
 
-```bash
-sudo cp deploy/second-brain-indexer.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now second-brain-indexer
-sudo systemctl status second-brain-indexer --no-pager
-```
-
-```fish
+```text
 sudo cp deploy/second-brain-indexer.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now second-brain-indexer
@@ -150,12 +120,7 @@ sudo systemctl reload nginx
 
 After nginx authentication is configured:
 
-```bash
-curl --fail-with-body https://indexer.example.com/indexer/status
-curl --fail-with-body -X POST https://indexer.example.com/indexer/fullscan
-```
-
-```fish
+```text
 curl --fail-with-body https://indexer.example.com/indexer/status
 curl --fail-with-body -X POST https://indexer.example.com/indexer/fullscan
 ```
