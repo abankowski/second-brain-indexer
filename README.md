@@ -27,6 +27,10 @@ sudo apt install -y build-essential ca-certificates curl git nginx pkg-config li
 
 ### 2. Clone and build the pinned Rust project
 
+Choose the block for the shell you use. They differ only in the command that loads Cargo into the current shell.
+
+#### Bash
+
 ```bash
 git clone https://github.com/abankowski/second-brain-indexer.git
 cd second-brain-indexer
@@ -34,6 +38,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profil
 . "$HOME/.cargo/env"
 cargo build --release
 ```
+
+#### Fish
 
 ```fish
 git clone https://github.com/abankowski/second-brain-indexer.git
