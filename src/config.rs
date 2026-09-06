@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, path::PathBuf, time::Duration};
+use std::{net::SocketAddr, num::NonZeroU32, path::PathBuf, time::Duration};
 
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -48,7 +48,7 @@ impl AppConfig {
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
-    pub bind: String,
+    pub bind: SocketAddr,
     pub request_timeout: Duration,
 }
 #[derive(Clone, Debug)]
@@ -191,7 +191,7 @@ impl RawConfig {
 
         Ok(AppConfig {
             server: ServerConfig {
-                bind: required("server.bind", self.server.bind)?,
+                bind: parse_socket_addr("server.bind", self.server.bind)?,
                 request_timeout: non_zero_duration(
                     self.server.request_timeout_seconds,
                     "server.request_timeout_seconds",
@@ -260,6 +260,12 @@ fn required_path(field: &'static str, value: PathBuf) -> Result<PathBuf, ConfigE
         .then_some(value)
         .ok_or(ConfigError::Blank(field))
 }
+fn parse_socket_addr(field: &'static str, value: String) -> Result<SocketAddr, ConfigError> {
+    let value = required(field, value)?;
+    value
+        .parse()
+        .map_err(|_| ConfigError::InvalidSocketAddress { field, value })
+}
 fn non_zero(value: u32, field: &'static str) -> Result<NonZeroU32, ConfigError> {
     NonZeroU32::new(value).ok_or(ConfigError::Zero(field))
 }
@@ -299,6 +305,8 @@ pub enum ConfigError {
     Zero(&'static str),
     #[error("{0} must be an absolute HTTP(S) URL")]
     InvalidUrl(&'static str),
+    #[error("{field} must be an IP address and port, for example 127.0.0.1:9184; got {value:?}")]
+    InvalidSocketAddress { field: &'static str, value: String },
     #[error("unsupported MCP transport: {0}")]
     UnsupportedMcpTransport(String),
     #[error("mcp.batch_size must be in 1..=1024, got {0}")]
@@ -413,6 +421,19 @@ idempotency_ttl_hours = 24
                 &secrets()
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn rejects_server_bind_values_that_are_not_ip_address_and_port() {
+        let error = parse_toml(
+            &config().replace("127.0.0.1:9184", "127.0.0.1:99999"),
+            &secrets(),
+        )
+        .expect_err("an out-of-range port is not a server socket address");
+
+        assert_eq!(
+            error.to_string(),
+            "server.bind must be an IP address and port, for example 127.0.0.1:9184; got \"127.0.0.1:99999\""
         );
     }
     #[test]

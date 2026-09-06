@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use second_brain_indexer::{
@@ -93,7 +93,7 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|_| "idempotency TTL is outside the supported range")?,
         shutdown.clone(),
     );
-    let address: SocketAddr = config.server.bind.parse()?;
+    let address = config.server.bind;
     let listener = TcpListener::bind(address).await?;
     let processor = Arc::new(ProductionProcessor {
         state: Arc::clone(&state),
