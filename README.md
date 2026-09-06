@@ -64,6 +64,60 @@ cargo test --workspace --all-targets
 
 All tests should pass before installation. The test suite does not contact your MCP endpoint or OpenAI.
 
+## Quick local smoke test (no systemd or nginx)
+
+Use this when you want to start the executable directly from your shell before setting up the VM service. It starts on the `server.bind` address from the config (the template uses `127.0.0.1:9184`). It contacts MCP at startup to verify the vector dimension, but does not create embeddings or write vectors until you submit an indexing request.
+
+Build the release binary, then make a local copy of the template:
+
+```text
+cargo build --release
+mkdir -p .local
+cp deploy/config.toml.example .local/config.toml
+vi .local/config.toml
+vi .local/secrets.env
+chmod 0600 .local/secrets.env
+```
+
+Set the real MCP endpoint and compatible embedding model in `.local/config.toml`; leave `dimensions = 384` unless the MCP vector store was deliberately changed. In `.local/secrets.env`, put the two secrets as unquoted `NAME=value` lines:
+
+```text
+MCP_MEMORY_TOKEN=replace-with-your-MCP-token
+OPENAI_API_KEY=replace-with-your-OpenAI-key
+```
+
+`.local/` is ignored by Git. Keep the values free of whitespace; do not commit, paste, or pass secrets on the command line.
+
+In **Bash**, load that file and give the executable its config path:
+
+```bash
+set -a
+. .local/secrets.env
+set +a
+target/release/second-brain-indexer --config .local/config.toml
+```
+
+Leave that terminal running. In a second terminal, check readiness without nginx:
+
+```text
+curl --fail-with-body http://127.0.0.1:9184/indexer/status
+```
+
+<details>
+<summary>Using Fish instead of Bash?</summary>
+
+```fish
+for line in (string match -rv '^\s*(#|$)' < .local/secrets.env)
+  set -l fields (string split -m1 = $line)
+  set -gx $fields[1] $fields[2]
+end
+target/release/second-brain-indexer --config .local/config.toml
+```
+
+</details>
+
+The VM service uses `/etc/second-brain-indexer/secrets.env` through systemd's `EnvironmentFile`; it is intentionally owned by the service account and should not be loaded into your login shell. Use the separate `.local/secrets.env` only for this direct local test. Do **not** call `POST /indexer/fullscan` until you are ready to use the configured OpenAI account and update vectors in your MCP instance. Stop the smoke test with `Ctrl+C`; the service safely drains and exits.
+
 ### 4. Create the service account and directories
 
 ```text
