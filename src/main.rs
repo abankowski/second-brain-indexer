@@ -10,8 +10,8 @@ use second_brain_indexer::{
     config::{AppConfig, EnvironmentSecretLookup, parse_toml},
     domain::model::{ClaimedRun, RunId},
     http::{
-        GenerationView, HttpDependencyError, HttpQueryPort, PollingView, RunSummaryView, RunView,
-        StatsView, StatusView, router_with_shutdown,
+        BearerAuth, GenerationView, HttpDependencyError, HttpQueryPort, PollingView,
+        RunSummaryView, RunView, StatsView, StatusView, router_with_shutdown_and_auth,
     },
     ports::McpMemoryPort,
     runtime::{
@@ -94,13 +94,18 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         config.clone(),
         shutdown.clone(),
     ));
-    let app = router_with_shutdown(
+    let app = router_with_shutdown_and_auth(
         Arc::clone(&state),
         Arc::clone(&mcp),
         query,
         time::Duration::try_from(config.api.idempotency_ttl)
             .map_err(|_| "idempotency TTL is outside the supported range")?,
         shutdown.clone(),
+        config
+            .api
+            .bearer_token
+            .clone()
+            .map_or_else(BearerAuth::disabled, BearerAuth::enabled),
     );
     let address = config.server.bind;
     let listener = TcpListener::bind(address).await?;

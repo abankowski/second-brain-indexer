@@ -38,3 +38,4 @@ max_delay_ms = 30000
 
 [api]
 idempotency_ttl_hours = 24
+auth_token_file = "/etc/second-brain-indexer/indexer-api-token"

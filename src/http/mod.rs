@@ -8,11 +8,14 @@ use axum::{
     Json, Router, body,
     extract::{Path, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
@@ -99,6 +102,39 @@ pub enum HttpDependencyError {
     Unavailable,
 }
 
+#[derive(Clone)]
+pub struct BearerAuth(Option<SecretString>);
+
+impl BearerAuth {
+    pub fn disabled() -> Self {
+        Self(None)
+    }
+
+    pub fn enabled(token: SecretString) -> Self {
+        Self(Some(token))
+    }
+
+    fn authorizes(&self, headers: &HeaderMap) -> bool {
+        let Some(expected) = &self.0 else {
+            return true;
+        };
+        let Some(value) = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return false;
+        };
+        let Some(provided) = value.trim().strip_prefix("Bearer ") else {
+            return false;
+        };
+        expected
+            .expose_secret()
+            .as_bytes()
+            .ct_eq(provided.trim().as_bytes())
+            .into()
+    }
+}
+
 struct AppState<S, M, Q> {
     state: Arc<S>,
     mcp: Arc<M>,
@@ -130,7 +166,29 @@ where
     M: McpMemoryPort + 'static,
     Q: HttpQueryPort + 'static,
 {
-    router_internal(state, mcp, query, idempotency_ttl, None)
+    router_internal(
+        state,
+        mcp,
+        query,
+        idempotency_ttl,
+        None,
+        BearerAuth::disabled(),
+    )
+}
+
+pub fn router_with_auth<S, M, Q>(
+    state: Arc<S>,
+    mcp: Arc<M>,
+    query: Arc<Q>,
+    idempotency_ttl: Duration,
+    auth: BearerAuth,
+) -> Router
+where
+    S: StateRepository + 'static,
+    M: McpMemoryPort + 'static,
+    Q: HttpQueryPort + 'static,
+{
+    router_internal(state, mcp, query, idempotency_ttl, None, auth)
 }
 
 /// Production router variant. Once `shutdown.begin()` is called, new mutating
@@ -148,7 +206,30 @@ where
     M: McpMemoryPort + 'static,
     Q: HttpQueryPort + 'static,
 {
-    router_internal(state, mcp, query, idempotency_ttl, Some(shutdown))
+    router_internal(
+        state,
+        mcp,
+        query,
+        idempotency_ttl,
+        Some(shutdown),
+        BearerAuth::disabled(),
+    )
+}
+
+pub fn router_with_shutdown_and_auth<S, M, Q>(
+    state: Arc<S>,
+    mcp: Arc<M>,
+    query: Arc<Q>,
+    idempotency_ttl: Duration,
+    shutdown: Shutdown,
+    auth: BearerAuth,
+) -> Router
+where
+    S: StateRepository + 'static,
+    M: McpMemoryPort + 'static,
+    Q: HttpQueryPort + 'static,
+{
+    router_internal(state, mcp, query, idempotency_ttl, Some(shutdown), auth)
 }
 
 fn router_internal<S, M, Q>(
@@ -157,6 +238,7 @@ fn router_internal<S, M, Q>(
     query: Arc<Q>,
     idempotency_ttl: Duration,
     shutdown: Option<Shutdown>,
+    auth: BearerAuth,
 ) -> Router
 where
     S: StateRepository + 'static,
@@ -177,7 +259,20 @@ where
         .route("/indexer/fullscan", post(fullscan::<S, M, Q>))
         .route("/indexer/runs/{run_id}", get(run::<S, M, Q>))
         .route("/indexer/metrics", get(metrics::<S, M, Q>))
+        .layer(middleware::from_fn_with_state(auth, require_bearer))
         .with_state(app_state)
+}
+
+async fn require_bearer(State(auth): State<BearerAuth>, request: Request, next: Next) -> Response {
+    if auth.authorizes(request.headers()) {
+        next.run(request).await
+    } else {
+        error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "authorization is required",
+        )
+    }
 }
 
 async fn status<S, M, Q>(State(app): State<AppState<S, M, Q>>) -> Response

@@ -10,8 +10,9 @@ use second_brain_indexer::{
         ClaimedRun, EntityName, EntityType, GraphEntity, GraphSnapshot, Lease, RunId, Selector,
     },
     http::{
-        GenerationView, HttpDependencyError, HttpQueryPort, PollingView, RunSummaryView, RunView,
-        StatsView, StatusView, router, router_with_shutdown,
+        BearerAuth, GenerationView, HttpDependencyError, HttpQueryPort, PollingView,
+        RunSummaryView, RunView, StatsView, StatusView, router, router_with_auth,
+        router_with_shutdown,
     },
     ports::{
         BatchWriteResult, CompletedWork, EnqueueOutcome, EnqueueRequest, FailedWork, McpError,
@@ -19,6 +20,7 @@ use second_brain_indexer::{
     },
     runtime::shutdown::Shutdown,
 };
+use secrecy::SecretString;
 use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 
@@ -224,6 +226,16 @@ fn app(state: Arc<FakeState>, available: bool) -> axum::Router {
     )
 }
 
+fn app_with_auth(state: Arc<FakeState>) -> axum::Router {
+    router_with_auth(
+        state,
+        Arc::new(FakeMcp { available: true }),
+        Arc::new(FakeQuery { available: true }),
+        Duration::seconds(60),
+        BearerAuth::enabled(SecretString::from("indexer-test-token")),
+    )
+}
+
 fn app_with_shutdown(state: Arc<FakeState>, shutdown: Shutdown) -> axum::Router {
     router_with_shutdown(
         state,
@@ -406,6 +418,43 @@ async fn read_routes_and_body_limit_follow_the_contract() {
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert!(body.contains("request_too_large"));
+}
+
+#[tokio::test]
+async fn bearer_auth_rejects_missing_or_wrong_tokens_without_leaking_the_expected_token() {
+    let state = Arc::new(FakeState::queued());
+    let (status, body, _) = response(
+        app_with_auth(state.clone()),
+        Request::builder()
+            .uri("/indexer/status")
+            .body(Body::empty())
+            .expect("request builds"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!body.contains("indexer-test-token"));
+
+    let (status, _, _) = response(
+        app_with_auth(state.clone()),
+        Request::builder()
+            .uri("/indexer/status")
+            .header("Authorization", "Bearer wrong-token")
+            .body(Body::empty())
+            .expect("request builds"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _, _) = response(
+        app_with_auth(state),
+        Request::builder()
+            .uri("/indexer/status")
+            .header("Authorization", "Bearer indexer-test-token")
+            .body(Body::empty())
+            .expect("request builds"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]

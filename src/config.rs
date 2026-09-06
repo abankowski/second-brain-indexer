@@ -98,6 +98,7 @@ pub struct RetryConfig {
 #[derive(Clone, Debug)]
 pub struct ApiConfig {
     pub idempotency_ttl: Duration,
+    pub bearer_token: Option<SecretString>,
 }
 
 pub fn parse_toml(input: &str, secrets: &impl SecretLookup) -> Result<AppConfig, ConfigError> {
@@ -166,6 +167,7 @@ struct RawRetryConfig {
 #[derive(Deserialize)]
 struct RawApiConfig {
     idempotency_ttl_hours: u64,
+    auth_token_file: Option<PathBuf>,
 }
 
 impl RawConfig {
@@ -188,6 +190,7 @@ impl RawConfig {
         if self.mcp.batch_size == 0 || self.mcp.batch_size > MAX_MCP_BATCH_SIZE {
             return Err(ConfigError::InvalidBatchSize(self.mcp.batch_size));
         }
+        let bearer_token = optional_bearer_token(self.api.auth_token_file)?;
 
         Ok(AppConfig {
             server: ServerConfig {
@@ -245,6 +248,7 @@ impl RawConfig {
                     self.api.idempotency_ttl_hours,
                     "api.idempotency_ttl_hours",
                 )?,
+                bearer_token,
             },
         })
     }
@@ -294,6 +298,20 @@ fn required_secret(
         .get(variable)
         .ok_or_else(|| ConfigError::MissingSecret(variable.to_owned()))
 }
+fn optional_bearer_token(path: Option<PathBuf>) -> Result<Option<SecretString>, ConfigError> {
+    path.map(|path| {
+        let path = required_path("api.auth_token_file", path)?;
+        let token =
+            std::fs::read_to_string(&path).map_err(|source| ConfigError::AuthTokenFile {
+                path: path.clone(),
+                source,
+            })?;
+        (!token.trim().is_empty())
+            .then(|| SecretString::from(token.trim().to_owned()))
+            .ok_or(ConfigError::EmptyAuthTokenFile)
+    })
+    .transpose()
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -313,6 +331,14 @@ pub enum ConfigError {
     InvalidBatchSize(u16),
     #[error("required secret is unavailable: {0}")]
     MissingSecret(String),
+    #[error("could not read api.auth_token_file {path}: {source}")]
+    AuthTokenFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("api.auth_token_file must contain a non-empty bearer token")]
+    EmptyAuthTokenFile,
     #[error(transparent)]
     Domain(#[from] DomainError),
 }
@@ -320,7 +346,7 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::{SecretLookup, parse_toml};
-    use secrecy::SecretString;
+    use secrecy::{ExposeSecret, SecretString};
     use std::collections::BTreeMap;
 
     struct TestSecrets(BTreeMap<String, SecretString>);
@@ -441,6 +467,27 @@ idempotency_ttl_hours = 24
         let error = parse_toml(&config(), &TestSecrets(BTreeMap::new()));
         assert!(error.is_err());
         assert!(!format!("{error:?}").contains("mcp-secret"));
+    }
+
+    #[test]
+    fn trims_the_optional_api_bearer_token_file_at_startup() {
+        let token_file = tempfile::NamedTempFile::new().expect("token file creates");
+        std::fs::write(token_file.path(), "\n  indexer-api-token  \n").expect("token file writes");
+        let path = token_file.path().display();
+        let input = config().replace(
+            "idempotency_ttl_hours = 24",
+            &format!("idempotency_ttl_hours = 24\nauth_token_file = {path:?}"),
+        );
+
+        let parsed = parse_toml(&input, &secrets()).expect("configuration parses");
+        assert_eq!(
+            parsed
+                .api
+                .bearer_token
+                .expect("token file enables bearer auth")
+                .expose_secret(),
+            "indexer-api-token"
+        );
     }
 
     #[test]

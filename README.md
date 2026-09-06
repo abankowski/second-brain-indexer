@@ -76,10 +76,12 @@ mkdir -p .local
 cp deploy/config.toml.example .local/config.toml
 vi .local/config.toml
 vi .local/secrets.env
+openssl rand -base64 48 > .local/indexer-api-token
 chmod 0600 .local/secrets.env
+chmod 0600 .local/indexer-api-token
 ```
 
-Set the real MCP endpoint and compatible embedding model in `.local/config.toml`; leave `dimensions = 384` unless the MCP vector store was deliberately changed. In `.local/secrets.env`, put the two secrets as unquoted `NAME=value` lines:
+Set the real MCP endpoint and compatible embedding model in `.local/config.toml`; set `api.auth_token_file = ".local/indexer-api-token"`; and leave `dimensions = 384` unless the MCP vector store was deliberately changed. In `.local/secrets.env`, put the two secrets as unquoted `NAME=value` lines:
 
 ```text
 MCP_MEMORY_TOKEN=replace-with-your-MCP-token
@@ -97,10 +99,13 @@ set +a
 target/release/second-brain-indexer --config .local/config.toml
 ```
 
-Direct shell runs print readable INFO messages to standard error: configuration accepted, MCP session/dimension verification, then `indexer ready` with its listener and polling state. This startup probe does **not** list MCP tools, read the graph, create embeddings, or write vectors. Leave that terminal running. In a second terminal, check readiness without nginx:
+Direct shell runs print readable INFO messages to standard error: configuration accepted, MCP session/dimension verification, then `indexer ready` with its listener and polling state. This startup probe does **not** list MCP tools, read the graph, create embeddings, or write vectors. Leave that terminal running. In a second terminal, set the local API token and check readiness without nginx:
 
-```text
-curl --fail-with-body http://127.0.0.1:9184/indexer/status
+```bash
+read -r -s -p "Indexer API token: " INDEXER_API_TOKEN; echo
+curl --fail-with-body \
+  -H "Authorization: Bearer $INDEXER_API_TOKEN" \
+  http://127.0.0.1:9184/indexer/status
 ```
 
 <details>
@@ -151,6 +156,16 @@ MCP_MEMORY_TOKEN=replace-with-a-rotated-token
 OPENAI_API_KEY=replace-with-your-openai-key
 ```
 
+Create the separate API bearer-token file. It contains one raw token, following the `mcp-memory` HTTP-auth pattern; it is read once when the service starts.
+
+```text
+openssl rand -base64 48 | sudo tee /etc/second-brain-indexer/indexer-api-token > /dev/null
+sudo chown second-brain-indexer:second-brain-indexer /etc/second-brain-indexer/indexer-api-token
+sudo chmod 0600 /etc/second-brain-indexer/indexer-api-token
+```
+
+Do not put this token in `secrets.env`, TOML, Nginx, Git, logs, or shell history. Replacing the file and restarting the service rotates it; the old token stops working after restart.
+
 ### 6. Install and start systemd
 
 ```text
@@ -168,7 +183,7 @@ sudo journalctl -u second-brain-indexer -n 100 --no-pager
 
 ### 7. Put nginx in front of it
 
-Copy [`deploy/nginx-second-brain-indexer.conf`](deploy/nginx-second-brain-indexer.conf), replace the hostname and add TLS plus authentication. The service listens only on `127.0.0.1:9184`; do not expose that port directly.
+Copy [`deploy/nginx-second-brain-indexer.conf`](deploy/nginx-second-brain-indexer.conf), replace the hostname and add TLS. The indexer itself enforces bearer authentication; Nginx passes the `Authorization` header through by default. The service listens only on `127.0.0.1:9184`; do not expose that port directly.
 
 Before enabling the `/indexer/` location, define its rate-limit zone **once** in nginx's `http` scope. On Debian/Ubuntu, a file in `/etc/nginx/conf.d/` is included from that scope:
 
@@ -193,14 +208,34 @@ sudo systemctl reload nginx
 
 ### 8. Verify and start the first scan
 
-After nginx authentication is configured:
+In **Bash**, enter the API token without putting it in shell history, then call the protected API:
 
-```text
-curl --fail-with-body https://indexer.example.com/indexer/status
-curl --fail-with-body -X POST https://indexer.example.com/indexer/fullscan
+```bash
+read -r -s -p "Indexer API token: " INDEXER_API_TOKEN; echo
+curl --fail-with-body \
+  -H "Authorization: Bearer $INDEXER_API_TOKEN" \
+  https://indexer.example.com/indexer/status
+curl --fail-with-body \
+  -H "Authorization: Bearer $INDEXER_API_TOKEN" \
+  -X POST https://indexer.example.com/indexer/fullscan
 ```
 
-Replace `indexer.example.com` with your hostname. Save the `runId` from the `202` response, then query `/indexer/runs/<runId>` until it reaches a final state.
+<details>
+<summary>Using Fish instead of Bash?</summary>
+
+```fish
+read -s -P "Indexer API token: " INDEXER_API_TOKEN; echo
+curl --fail-with-body \
+  -H "Authorization: Bearer $INDEXER_API_TOKEN" \
+  https://indexer.example.com/indexer/status
+curl --fail-with-body \
+  -H "Authorization: Bearer $INDEXER_API_TOKEN" \
+  -X POST https://indexer.example.com/indexer/fullscan
+```
+
+</details>
+
+Replace `indexer.example.com` with your hostname. Save the `runId` from the `202` response, then query `/indexer/runs/<runId>` with the same `Authorization: Bearer` header until it reaches a final state.
 
 ## Before production use
 

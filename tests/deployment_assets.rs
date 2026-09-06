@@ -8,6 +8,9 @@ fn deployment_assets_keep_the_indexer_private_and_preserve_the_indexer_prefix() 
     assert!(service.contains("ProtectSystem=strict"));
     assert!(service.contains("ReadWritePaths=/var/lib/second-brain-indexer"));
 
+    let config = read("deploy/config.toml.example");
+    assert!(config.contains("auth_token_file = \"/etc/second-brain-indexer/indexer-api-token\""));
+
     let nginx = read("deploy/nginx-second-brain-indexer.conf");
     assert!(nginx.contains("location /indexer/"));
     assert!(nginx.contains("proxy_pass http://127.0.0.1:9184;"));
@@ -17,6 +20,7 @@ fn deployment_assets_keep_the_indexer_private_and_preserve_the_indexer_prefix() 
     let readme = read("README.md");
     assert!(readme.contains("limit_req_zone $binary_remote_addr zone=indexer_api:10m rate=10r/m;"));
     assert!(readme.contains("/etc/nginx/conf.d/second-brain-indexer-rate-limit.conf"));
+    assert!(readme.contains("Authorization: Bearer"));
 }
 
 #[test]

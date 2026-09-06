@@ -2,7 +2,7 @@
 
 ## Install and configure
 
-Create a system user with no login shell, then install the binary, [service unit](../deploy/second-brain-indexer.service), [nginx fragment](../deploy/nginx-second-brain-indexer.conf), and [configuration template](../deploy/config.toml.example). The service binds only `127.0.0.1:9184`; nginx is the TLS and authentication boundary.
+Create a system user with no login shell, then install the binary, [service unit](../deploy/second-brain-indexer.service), [nginx fragment](../deploy/nginx-second-brain-indexer.conf), and [configuration template](../deploy/config.toml.example). The service binds only `127.0.0.1:9184`; nginx is the TLS and rate-limit boundary, while the indexer enforces bearer authentication.
 
 Create `/etc/second-brain-indexer/secrets.env` as root, owned by `second-brain-indexer`, mode `0600`:
 
@@ -12,6 +12,16 @@ OPENAI_API_KEY=replace-with-openai-key
 ```
 
 Never put either value in TOML, systemd unit text, nginx, Git, logs, or a support ticket.
+
+Create `/etc/second-brain-indexer/indexer-api-token`, owned by `second-brain-indexer`, mode `0600`. It holds one raw bearer token, trimmed and read once at startup:
+
+```text
+openssl rand -base64 48 | sudo tee /etc/second-brain-indexer/indexer-api-token > /dev/null
+sudo chown second-brain-indexer:second-brain-indexer /etc/second-brain-indexer/indexer-api-token
+sudo chmod 0600 /etc/second-brain-indexer/indexer-api-token
+```
+
+The config template points `api.auth_token_file` to it. An absent field disables authentication only for local development; an empty or unreadable configured file prevents startup. Rotate by atomically replacing the file and restarting the service.
 
 ## Nginx rate-limit zone
 
@@ -55,7 +65,7 @@ curl --fail-with-body https://example.invalid/indexer/status
 curl --fail-with-body -X POST https://example.invalid/indexer/fullscan
 ```
 
-Replace `example.invalid` with the approved TLS hostname and configure nginx authentication before use. Poll run status with the `runId` returned by the `202` response. Do not call the loopback service from outside the host.
+Replace `example.invalid` with the approved TLS hostname and add `-H "Authorization: Bearer $INDEXER_API_TOKEN"` to every request. Poll run status with the `runId` returned by the `202` response. Do not call the loopback service from outside the host.
 
 ## Shutdown and recovery
 
