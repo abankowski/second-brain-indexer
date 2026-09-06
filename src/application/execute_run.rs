@@ -38,6 +38,34 @@ pub struct ExecutionReport {
     pub skipped: u32,
     pub deleted: u32,
     pub failed: u32,
+    pub failure_counts: BTreeMap<&'static str, u32>,
+}
+
+impl ExecutionReport {
+    fn empty() -> Self {
+        Self {
+            indexed: 0,
+            skipped: 0,
+            deleted: 0,
+            failed: 0,
+            failure_counts: BTreeMap::new(),
+        }
+    }
+
+    fn record_failure(&mut self, code: &'static str, count: u32) {
+        self.failed += count;
+        *self.failure_counts.entry(code).or_default() += count;
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.indexed += other.indexed;
+        self.skipped += other.skipped;
+        self.deleted += other.deleted;
+        self.failed += other.failed;
+        for (code, count) in other.failure_counts {
+            *self.failure_counts.entry(code).or_default() += count;
+        }
+    }
 }
 
 pub struct RunExecutor<'a, M, E, S> {
@@ -142,12 +170,7 @@ where
             .iter()
             .map(|entity| (entity.name.clone(), entity.entity_type.as_str().to_owned()))
             .collect::<BTreeMap<_, _>>();
-        let mut report = ExecutionReport {
-            indexed: 0,
-            skipped: 0,
-            deleted: 0,
-            failed: 0,
-        };
+        let mut report = ExecutionReport::empty();
         let mut upserts = Vec::new();
         for action in actions {
             match action {
@@ -211,7 +234,7 @@ where
                         Err(error) => {
                             self.fail(&claimed, entity_name, WorkAction::Delete, &error)
                                 .await?;
-                            report.failed += 1;
+                            report.record_failure(mcp_failure_code_from_execute(&error), 1);
                         }
                     }
                 }
@@ -219,8 +242,7 @@ where
         }
         for batch in upserts.chunks(usize::from(self.mcp_config.batch_size)) {
             let batch_report = self.embed_and_write(&claimed, now, batch.to_vec()).await?;
-            report.indexed += batch_report.indexed;
-            report.failed += batch_report.failed;
+            report.merge(batch_report);
         }
         let status = if report.failed == 0 {
             RunCompletionStatus::Succeeded
@@ -271,13 +293,12 @@ where
                     )
                     .await?;
                 }
-                return Ok(ExecutionReport {
-                    indexed: 0,
-                    skipped: 0,
-                    deleted: 0,
-                    failed: u32::try_from(inputs.len())
-                        .map_err(|_| ExecuteRunError::InvalidBatchResult)?,
-                });
+                let mut report = ExecutionReport::empty();
+                report.record_failure(
+                    embedding_failure_code(&error),
+                    u32::try_from(inputs.len()).map_err(|_| ExecuteRunError::InvalidBatchResult)?,
+                );
+                return Ok(report);
             }
         };
         let writes = inputs
@@ -311,13 +332,12 @@ where
                     )
                     .await?;
                 }
-                return Ok(ExecutionReport {
-                    indexed: 0,
-                    skipped: 0,
-                    deleted: 0,
-                    failed: u32::try_from(inputs.len())
-                        .map_err(|_| ExecuteRunError::InvalidBatchResult)?,
-                });
+                let mut report = ExecutionReport::empty();
+                report.record_failure(
+                    mcp_failure_code(&error),
+                    u32::try_from(inputs.len()).map_err(|_| ExecuteRunError::InvalidBatchResult)?,
+                );
+                return Ok(report);
             }
         };
         let failed = result
@@ -336,12 +356,7 @@ where
         {
             return Err(ExecuteRunError::InvalidBatchResult);
         }
-        let mut report = ExecutionReport {
-            indexed: 0,
-            skipped: 0,
-            deleted: 0,
-            failed: 0,
-        };
+        let mut report = ExecutionReport::empty();
         for input in inputs
             .iter()
             .filter(|input| !failed.contains(&input.entity_name))
@@ -374,7 +389,7 @@ where
             )
             .await?;
             let _ = failure;
-            report.failed += 1;
+            report.record_failure("mcp_invalid_response", 1);
             return Ok(report);
         }
         let split_at = failed_inputs.len() / 2;
@@ -385,8 +400,8 @@ where
             Box::pin(self.write_batch(claimed, now, left_inputs, left_writes)).await?;
         let right_report =
             Box::pin(self.write_batch(claimed, now, right_inputs, right_writes)).await?;
-        report.indexed += left_report.indexed + right_report.indexed;
-        report.failed += left_report.failed + right_report.failed;
+        report.merge(left_report);
+        report.merge(right_report);
         Ok(report)
     }
 
@@ -570,14 +585,36 @@ fn error_kind_mcp(error: &McpError) -> McpError {
 fn error_code(error: &ExecuteRunError) -> &'static str {
     match error {
         ExecuteRunError::DimensionMismatch { .. } => "dimension_mismatch",
-        ExecuteRunError::Mcp(McpError::Unauthorized)
-        | ExecuteRunError::Embedding(EmbeddingError::Unauthorized) => "unauthorized",
-        ExecuteRunError::Mcp(McpError::RateLimited)
-        | ExecuteRunError::Embedding(EmbeddingError::RateLimited) => "rate_limited",
-        ExecuteRunError::Mcp(McpError::Transport(_))
-        | ExecuteRunError::Embedding(EmbeddingError::Transport) => "transport",
-        ExecuteRunError::Mcp(McpError::Server)
-        | ExecuteRunError::Embedding(EmbeddingError::Server) => "server",
-        _ => "invalid_response",
+        ExecuteRunError::Mcp(error) => mcp_failure_code(error),
+        ExecuteRunError::Embedding(error) => embedding_failure_code(error),
+        ExecuteRunError::State(_) => "state_failure",
+        ExecuteRunError::Planner(_) | ExecuteRunError::InvalidBatchResult => "invalid_response",
+    }
+}
+
+fn embedding_failure_code(error: &EmbeddingError) -> &'static str {
+    match error {
+        EmbeddingError::Transport => "embedding_transport",
+        EmbeddingError::Unauthorized => "embedding_unauthorized",
+        EmbeddingError::RateLimited => "embedding_rate_limited",
+        EmbeddingError::Server => "embedding_server",
+        EmbeddingError::InvalidResponse => "embedding_invalid_response",
+    }
+}
+
+fn mcp_failure_code(error: &McpError) -> &'static str {
+    match error {
+        McpError::Transport(_) => "mcp_transport",
+        McpError::Unauthorized => "mcp_unauthorized",
+        McpError::RateLimited => "mcp_rate_limited",
+        McpError::Server => "mcp_server",
+        McpError::InvalidResponse => "mcp_invalid_response",
+    }
+}
+
+fn mcp_failure_code_from_execute(error: &ExecuteRunError) -> &'static str {
+    match error {
+        ExecuteRunError::Mcp(error) => mcp_failure_code(error),
+        _ => error_code(error),
     }
 }

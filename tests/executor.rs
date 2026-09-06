@@ -344,7 +344,12 @@ async fn rate_limit_retries_inside_jitter_bound_and_auth_does_not() {
     let result = executor(&unauthorized_mcp, &FakeEmbedding, &unauthorized_state)
         .execute(claimed(), OffsetDateTime::UNIX_EPOCH)
         .await;
-    assert!(matches!(result, Ok(report) if report.failed == 1));
+    let report = result.expect("unauthorized MCP response is recorded as a failed item");
+    assert_eq!(report.failed, 1);
+    assert_eq!(
+        report.failure_counts,
+        std::collections::BTreeMap::from([("mcp_unauthorized", 1)])
+    );
     assert_eq!(
         unauthorized_mcp
             .upsert_calls

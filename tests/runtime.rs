@@ -5,6 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use second_brain_indexer::{
+    application::execute_run::ExecutionReport,
     domain::model::{ClaimedRun, IndexedEntityState, Lease, RunId},
     ports::{
         CompletedWork, EnqueueOutcome, EnqueueRequest, FailedWork, RunCompletion, StageWork,
@@ -13,6 +14,7 @@ use second_brain_indexer::{
     runtime::{
         bootstrap::Bootstrap,
         lock::ProcessLock,
+        logging::record_execution_report,
         metrics::{Metrics, RunOutcome, RuntimeErrorClass},
         scheduler::PollScheduler,
         shutdown::Shutdown,
@@ -191,4 +193,26 @@ fn metrics_have_bounded_labels_and_never_render_observations_or_secrets() {
     assert!(rendered.contains("second_brain_indexer_errors_total{class=\"mcp_transport\"} 1"));
     assert!(!rendered.contains("Bearer"));
     assert!(!rendered.contains("observation"));
+}
+
+#[test]
+fn failed_execution_report_is_recorded_as_a_failed_run() {
+    let metrics = Metrics::default();
+
+    record_execution_report(
+        &metrics,
+        &ExecutionReport {
+            indexed: 0,
+            skipped: 0,
+            deleted: 0,
+            failed: 253,
+            failure_counts: std::collections::BTreeMap::from([("embedding_unauthorized", 253)]),
+        },
+    );
+
+    assert!(
+        metrics
+            .render()
+            .contains("second_brain_indexer_runs_total{outcome=\"failed\"} 1")
+    );
 }

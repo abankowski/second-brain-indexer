@@ -175,7 +175,7 @@ sudo systemctl enable --now second-brain-indexer
 sudo systemctl status second-brain-indexer --no-pager
 ```
 
-If it fails, inspect the safe, redacted service log:
+The service writes startup and completed-run events to its standard output (systemd stores them in the journal). A failed run includes safe aggregate fields such as `failed=253` and `failure_classes={"embedding_unauthorized": 253}`; it never logs tokens, entity text, or provider response bodies. Inspect the service log with:
 
 ```text
 sudo journalctl -u second-brain-indexer -n 100 --no-pager
@@ -237,6 +237,17 @@ curl --fail-with-body \
 
 Replace `indexer.example.com` with your hostname. Save the `runId` from the `202` response, then query `/indexer/runs/<runId>` with the same `Authorization: Bearer` header until it reaches a final state.
 
+### Diagnose a completed failed run
+
+`/indexer/runs/<runId>` intentionally returns counters only. On an installed VM, the protected SQLite state holds the safe error class and message for each failed work item. This command is identical in Bash, Zsh, and Fish; replace the run ID with yours:
+
+```text
+sudo sqlite3 -header -column /var/lib/second-brain-indexer/indexer-state.db \
+  "SELECT last_error_code AS code, last_error_message AS message, COUNT(*) AS affected_entities FROM run_work WHERE run_id = 'YOUR-RUN-ID' AND status = 'failed' GROUP BY last_error_code, last_error_message ORDER BY affected_entities DESC;"
+```
+
+Typical results identify the boundary that failed: `embedding_unauthorized` means the configured OpenAI-compatible embedding service rejected its key; `mcp_transport`, `mcp_unauthorized`, or `mcp_server` identify the mcp-memory side. The database path is the `state.database_path` value in your config if you changed the deployment default.
+
 ## Before production use
 
 The deployed `mcp-memory` contract must be revalidated after every MCP upgrade. This checkout does not yet contain the read-only probe binary named by an older design note, so do not improvise a destructive check. In particular, verify that the target vector dimension is 384 and that the indexer has no deletion proof unless the MCP server explicitly provides one. Without that proof the service still indexes new/changed entities safely, but it deliberately does not delete vectors for missing entities.
@@ -254,7 +265,7 @@ Deployment is manual: open **Actions → Deploy**, choose the protected environm
 | Service is not ready | `journalctl`; token file ownership/mode; MCP endpoint reachability; 384-dimension configuration. |
 | `502 Bad Gateway` from nginx | `systemctl status second-brain-indexer`; nginx prefix config; local listener on `127.0.0.1:9184`. |
 | `zero size shared memory zone "indexer_api"` from nginx | Create `/etc/nginx/conf.d/second-brain-indexer-rate-limit.conf` in the `http` scope with `limit_req_zone $binary_remote_addr zone=indexer_api:10m rate=10r/m;`, then rerun `sudo nginx -t`. |
-| `401` from the indexer | nginx/auth-proxy configuration, not the Rust service. |
+| `401` from the indexer | Send the configured `Authorization: Bearer` token; check the token file's owner/mode and restart the service after rotation. |
 | No vectors are deleted | Expected unless MCP provides an explicit complete-read proof. |
 | Model/dimension mismatch | Prepare the MCP vector store externally first, then update indexer config and run a full scan. |
 

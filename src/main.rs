@@ -16,6 +16,7 @@ use second_brain_indexer::{
     ports::McpMemoryPort,
     runtime::{
         bootstrap::Bootstrap,
+        logging::record_execution_report,
         metrics::Metrics,
         scheduler::PollScheduler,
         shutdown::Shutdown,
@@ -113,6 +114,7 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         state: Arc::clone(&state),
         mcp,
         embedding,
+        metrics: Arc::clone(&metrics),
         config: config.clone(),
     });
     let worker_shutdown = shutdown.clone();
@@ -234,6 +236,7 @@ struct ProductionProcessor {
     state: Arc<SqliteStateRepository>,
     mcp: Arc<StreamableHttpMcpAdapter>,
     embedding: Arc<OpenAiEmbeddingAdapter>,
+    metrics: Arc<Metrics>,
     config: AppConfig,
 }
 
@@ -251,7 +254,7 @@ impl RunProcessor for ProductionProcessor {
         )
         .execute(claimed, OffsetDateTime::now_utc())
         .await
-        .map(|_| ())
+        .map(|report| record_execution_report(&self.metrics, &report))
         .map_err(|error| error.to_string())
     }
 }
