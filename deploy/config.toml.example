@@ -20,6 +20,8 @@ batch_size = 128
 bearer_token_env = "MCP_MEMORY_TOKEN"
 
 [embedding]
+# Replace this with a model accepted by your embedding provider. For OpenAI,
+# use "text-embedding-3-small"; the request below asks it for 384 dimensions.
 model = "target-compatible-384-dimension-model"
 dimensions = 384
 max_input_chars = 24000

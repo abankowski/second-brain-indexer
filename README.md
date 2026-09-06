@@ -248,6 +248,8 @@ sudo sqlite3 -header -column /var/lib/second-brain-indexer/indexer-state.db \
 
 Typical results identify the boundary that failed: `embedding_unauthorized` means the configured OpenAI-compatible embedding service rejected its key; `mcp_transport`, `mcp_unauthorized`, or `mcp_server` identify the mcp-memory side. The database path is the `state.database_path` value in your config if you changed the deployment default.
 
+For the standard OpenAI endpoint, set `embedding.model = "text-embedding-3-small"` and keep `embedding.dimensions = 384`. The indexer sends that dimension explicitly in the embeddings request. The template's `target-compatible-384-dimension-model` value is a placeholder for another OpenAI-compatible provider, not a model name accepted by api.openai.com.
+
 ## Before production use
 
 The deployed `mcp-memory` contract must be revalidated after every MCP upgrade. This checkout does not yet contain the read-only probe binary named by an older design note, so do not improvise a destructive check. In particular, verify that the target vector dimension is 384 and that the indexer has no deletion proof unless the MCP server explicitly provides one. Without that proof the service still indexes new/changed entities safely, but it deliberately does not delete vectors for missing entities.

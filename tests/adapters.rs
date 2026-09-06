@@ -301,6 +301,7 @@ async fn openai_adapter_sends_auth_and_restores_response_index_order() {
     assert_eq!(requests[0].body["model"], "test-model");
     assert_eq!(requests[0].body["input"], json!(["first", "second"]));
     assert_eq!(requests[0].body["encoding_format"], "float");
+    assert_eq!(requests[0].body["dimensions"], 2);
 }
 
 #[tokio::test]

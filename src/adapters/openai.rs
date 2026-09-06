@@ -54,6 +54,7 @@ impl EmbeddingProvider for OpenAiEmbeddingAdapter {
                 model: &self.model,
                 input: inputs,
                 encoding_format: "float",
+                dimensions: self.dimension.get(),
             })
             .send()
             .await
@@ -114,6 +115,7 @@ struct EmbeddingRequest<'a> {
     model: &'a str,
     input: &'a [String],
     encoding_format: &'static str,
+    dimensions: u32,
 }
 
 #[derive(Deserialize)]
