@@ -22,7 +22,7 @@ Run the following on the VM as a regular sudo-capable user. Unless explicitly la
 
 ```text
 sudo apt update
-sudo apt install -y build-essential ca-certificates curl git nginx pkg-config libssl-dev
+sudo apt install -y build-essential ca-certificates curl git nginx openssl pkg-config libssl-dev
 ```
 
 ### 2. Clone and build the pinned Rust project
