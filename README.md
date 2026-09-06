@@ -27,9 +27,7 @@ sudo apt install -y build-essential ca-certificates curl git nginx pkg-config li
 
 ### 2. Clone and build the pinned Rust project
 
-Choose the block for the shell you use. They differ only in the command that loads Cargo into the current shell.
-
-#### Bash
+Most VM users run Bash, so its instructions are shown first. The Fish alternative is collapsed; the only difference is the command that loads Cargo into the current shell.
 
 ```bash
 git clone https://github.com/abankowski/second-brain-indexer.git
@@ -39,7 +37,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profil
 cargo build --release
 ```
 
-#### Fish
+<details>
+<summary>Using Fish instead of Bash?</summary>
 
 ```fish
 git clone https://github.com/abankowski/second-brain-indexer.git
@@ -48,6 +47,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profil
 source "$HOME/.cargo/env.fish"
 cargo build --release
 ```
+
+</details>
 
 The project pins Rust in `rust-toolchain.toml`; you do not need to choose a Rust version yourself.
 
