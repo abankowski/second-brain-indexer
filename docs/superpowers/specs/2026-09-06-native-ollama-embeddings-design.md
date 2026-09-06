@@ -36,6 +36,22 @@ Startup creates the selected adapter, embeds a fixed non-user probe string, and 
 
 `main` owns the provider factory and passes `Arc<dyn EmbeddingProvider>` to `ProductionProcessor`; application code remains provider-neutral. Native Ollama errors use the existing bounded classes: transport, unauthorized, rate-limited, server, and invalid response. Logs retain provider-qualified aggregate error classes and never include input text, response bodies, or secrets.
 
+## Query MCP surface
+
+The indexer also exposes a separate authenticated Streamable HTTP MCP endpoint at `/indexer/mcp`. It is a query and orchestration façade, not a replacement for mcp-memory's graph tools. The endpoint uses the same bearer authentication policy as `/indexer/*`.
+
+| Tool | Input | Behaviour |
+|---|---|---|
+| `indexer_semantic_search` | `query`, optional `limit`, optional `entityType` | Embed natural-language `query` through the selected server-side provider, then call mcp-memory semantic-vector search. |
+| `indexer_hybrid_search` | `query`, optional `limit`, optional `entityType` | Embed `query` server-side, then call mcp-memory hybrid search. |
+| `indexer_reindex_entity` | exact `entityName` | Validate that the entity exists and enqueue the existing durable one-entity selector; return `runId` and queue/coalescing outcome. |
+| `indexer_reindex_all` | no arguments | Enqueue the existing durable full selector; return `runId` and queue/coalescing outcome. |
+| `indexer_run_status` | `runId` | Return the existing durable run counters and terminal/in-progress state. |
+
+The semantic and hybrid result schemas are pinned only after a fresh, read-only mcp-memory `tools/list` and tool-contract probe. The facade normalizes successful results into one documented response shape. It rejects invalid arguments, unavailable dependencies, and unavailable indexer shutdown state with MCP tool errors; it never exposes provider credentials, raw vectors, or provider response bodies.
+
+Claude/Cowork configuration receives this endpoint as a second MCP server. The existing mcp-memory server remains available for graph operations. Its vector tools must not be called by skills for natural-language questions because clients cannot create compatible query embeddings without the server-side provider credentials.
+
 ## Migration safety
 
 Changing provider, model, or dimensions changes embedding space. README must state that vectors from old and new engines must never coexist. For any switch:
@@ -50,7 +66,7 @@ The indexer does not delete or rewrite mcp-memory's database directly. The opera
 
 ## Tests and gates
 
-Unit/integration tests cover tagged configuration validation, Ollama request shape, ordered batched response, all response/error classes, probe dimension mismatch before HTTP bind, and unchanged OpenAI-compatible behavior. A local acceptance probe against the user's Ollama BGE-M3 instance runs only when it is reachable and checks non-empty 1024-dimensional output; it writes no vectors. Completion requires `cargo fmt --all -- --check`, strict Clippy, all tests, release build, `git diff --check`, and the local probe when available.
+Unit/integration tests cover tagged configuration validation, Ollama request shape, ordered batched response, all response/error classes, probe dimension mismatch before HTTP bind, unchanged OpenAI-compatible behavior, MCP initialize/tools-list, bearer authentication, semantic/hybrid delegation with no raw-vector response, queue coalescing for single/full reindexing, and status lookup. A local acceptance probe against the user's Ollama BGE-M3 instance runs only when it is reachable and checks non-empty 1024-dimensional output; it writes no vectors. Completion requires `cargo fmt --all -- --check`, strict Clippy, all tests, release build, `git diff --check`, and the local probe when available.
 
 ## Rejected alternatives
 
