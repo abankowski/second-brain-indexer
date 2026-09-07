@@ -20,14 +20,25 @@ batch_size = 128
 bearer_token_env = "MCP_MEMORY_TOKEN"
 
 [embedding]
-# Replace this with a model accepted by your embedding provider. For OpenAI,
-# use "text-embedding-3-small"; the request below asks it for 384 dimensions.
-model = "target-compatible-384-dimension-model"
+# OpenAI-compatible is the default. `base_url` must include the provider's /v1
+# API prefix, and `api_key_env` names the secret in systemd's EnvironmentFile.
+provider = "openai-compatible"
+model = "text-embedding-3-small"
 dimensions = 384
 max_input_chars = 24000
 max_input_tokens = 8192
-openai_base_url = "https://api.openai.com/v1"
+base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+
+# Native Ollama alternative: replace the complete [embedding] block above with
+# these values after rebuilding mcp-memory's vector store for 1024 dimensions.
+# provider = "ollama"
+# model = "bge-m3"
+# dimensions = 1024
+# max_input_chars = 24000
+# max_input_tokens = 8192
+# base_url = "http://127.0.0.1:11434"
+# Do not set api_key_env for Ollama: this provider rejects it.
 
 [representation]
 version = "entity-v1"

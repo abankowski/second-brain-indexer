@@ -1010,6 +1010,26 @@ async fn indexer_mcp_checks_origin_on_get_and_accepts_client_response_envelopes(
 }
 
 #[tokio::test]
+async fn indexer_mcp_accepts_a_response_only_batch_without_a_body() {
+    let app = mcp_app(
+        Arc::new(FakeState::queued()),
+        true,
+        Shutdown::new(),
+        Arc::new(FakeEmbedding),
+    );
+    let (status, body, _) = response(
+        app,
+        mcp_request(serde_json::json!([
+            {"jsonrpc":"2.0","id":5,"result":{}},
+            {"jsonrpc":"2.0","id":"request-5","error":{"code":-32603,"message":"Internal error"}}
+        ])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
 async fn indexer_mcp_missing_runs_and_entities_report_bounded_tool_errors() {
     let state = Arc::new(FakeState::queued());
     for (tool, args, code) in [

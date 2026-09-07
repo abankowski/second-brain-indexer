@@ -1,6 +1,6 @@
 # Second Brain Indexer
 
-Second Brain Indexer keeps one embedding per `mcp-memory` entity up to date. It is a small Rust service: it reads the graph through MCP, obtains embeddings from OpenAI, and writes vectors back through MCP. It never edits the `mcp-memory` database directly.
+Second Brain Indexer keeps one embedding per `mcp-memory` entity up to date. It is a small Rust service: it reads the graph through MCP, obtains embeddings from an OpenAI-compatible provider or native Ollama, and writes vectors back through MCP. It never edits the `mcp-memory` database directly.
 
 For V1, an entity's exact name is its identity and vector address. The target vector store currently requires 384-dimensional vectors. The service refuses to write if its configuration does not match the store.
 
@@ -9,7 +9,7 @@ For V1, an entity's exact name is its identity and vector address. The target ve
 - A Debian/Ubuntu VM with `sudo` access.
 - An HTTPS hostname pointing at that VM (for example `indexer.example.com`).
 - A running `mcp-memory` endpoint and a **rotated** bearer token.
-- An OpenAI API key and an embedding model that produces the target store's configured dimension.
+- Either an OpenAI-compatible embedding API key, or a reachable native Ollama server with the selected model installed.
 - Nginx and a real authentication mechanism in front of the public endpoint.
 
 This repository deliberately does not include a production token, TLS certificate, or deployment receiver.
@@ -81,11 +81,11 @@ chmod 0600 .local/secrets.env
 chmod 0600 .local/indexer-api-token
 ```
 
-Set the real MCP endpoint and compatible embedding model in `.local/config.toml`; set `api.auth_token_file = ".local/indexer-api-token"`; and leave `dimensions = 384` unless the MCP vector store was deliberately changed. In `.local/secrets.env`, put the two secrets as unquoted `NAME=value` lines:
+Set the real MCP endpoint and a provider configuration in `.local/config.toml`; set `api.auth_token_file = ".local/indexer-api-token"`. The copied template starts with the OpenAI-compatible 384-dimensional example. In `.local/secrets.env`, put the MCP token and, only for the OpenAI-compatible provider, its API key as unquoted `NAME=value` lines:
 
 ```text
 MCP_MEMORY_TOKEN=replace-with-your-MCP-token
-OPENAI_API_KEY=replace-with-your-OpenAI-key
+OPENAI_API_KEY=replace-with-your-openai-compatible-key
 ```
 
 `.local/` is ignored by Git. Keep the values free of whitespace; do not commit, paste, or pass secrets on the command line.
@@ -121,7 +121,7 @@ target/release/second-brain-indexer --config .local/config.toml
 
 </details>
 
-The VM service uses `/etc/second-brain-indexer/secrets.env` through systemd's `EnvironmentFile`; it is intentionally owned by the service account and should not be loaded into your login shell. Use the separate `.local/secrets.env` only for this direct local test. Do **not** call `POST /indexer/fullscan` until you are ready to use the configured OpenAI account and update vectors in your MCP instance. Stop the smoke test with `Ctrl+C`; the service safely drains and exits.
+The VM service uses `/etc/second-brain-indexer/secrets.env` through systemd's `EnvironmentFile`; it is intentionally owned by the service account and should not be loaded into your login shell. Use the separate `.local/secrets.env` only for this direct local test. Native Ollama does not use `OPENAI_API_KEY`; remove that line rather than leaving an unused key in the file. Do **not** call `POST /indexer/fullscan` until you are ready to use the configured provider and update vectors in your MCP instance. Stop the smoke test with `Ctrl+C`; the service safely drains and exits.
 
 ### 4. Create the service account and directories
 
@@ -139,7 +139,7 @@ sudo cp deploy/config.toml.example /etc/second-brain-indexer/config.toml
 sudoedit /etc/second-brain-indexer/config.toml
 ```
 
-Set the MCP endpoint, model, and dimension. Keep `dimensions = 384` unless the `mcp-memory` vector store has been deliberately reconfigured first. Never switch model/dimension by editing the indexer alone.
+Set the MCP endpoint, model, and dimension. The template's active example is OpenAI-compatible: `provider = "openai-compatible"`, `base_url = "https://api.openai.com/v1"`, and `api_key_env = "OPENAI_API_KEY"`. Its `dimensions = 384` must equal the MCP vector-store dimension. For native Ollama, replace the entire `[embedding]` block with the commented `provider = "ollama"`, `model = "bge-m3"`, `dimensions = 1024`, and `base_url = "http://127.0.0.1:11434"` alternative. Ollama rejects `api_key_env`; do not add it.
 
 Create the secret file:
 
@@ -153,7 +153,7 @@ Its contents are only:
 
 ```text
 MCP_MEMORY_TOKEN=replace-with-a-rotated-token
-OPENAI_API_KEY=replace-with-your-openai-key
+OPENAI_API_KEY=replace-with-your-openai-compatible-key
 ```
 
 Create the separate API bearer-token file. It contains one raw token, following the `mcp-memory` HTTP-auth pattern; it is read once when the service starts.
@@ -248,11 +248,48 @@ sudo sqlite3 -header -column /var/lib/second-brain-indexer/indexer-state.db \
 
 Typical results identify the boundary that failed: `embedding_unauthorized` means the configured OpenAI-compatible embedding service rejected its key; `mcp_transport`, `mcp_unauthorized`, or `mcp_server` identify the mcp-memory side. The database path is the `state.database_path` value in your config if you changed the deployment default.
 
-For the standard OpenAI endpoint, set `embedding.model = "text-embedding-3-small"` and keep `embedding.dimensions = 384`. The indexer sends that dimension explicitly in the embeddings request. The template's `target-compatible-384-dimension-model` value is a placeholder for another OpenAI-compatible provider, not a model name accepted by api.openai.com.
+For the standard OpenAI endpoint, set `embedding.provider = "openai-compatible"`, `embedding.model = "text-embedding-3-small"`, and choose a dimension supported by both OpenAI and the rebuilt MCP store (the template uses 384). The indexer sends that dimension explicitly in the embeddings request. For native Ollama, use `embedding.provider = "ollama"`; it sends batches to Ollama's stable `/api/embed` endpoint and does not use Ollama's experimental OpenAI-compatible API.
+
+## BGE-M3 1024-dimensional migration
+
+Changing a provider, model, or dimension changes the embedding space. Old and new vectors must never coexist. This is a coordinated maintenance operation owned by the `mcp-memory` operator; the indexer neither deletes nor rebuilds that database.
+
+1. Stop the indexer and pause callers that could enqueue scans.
+2. Rebuild the mcp-memory vector store for 1024 dimensions, using that deployment's documented rebuild procedure. This removes the old vector index; do not attempt to preserve 384-dimensional vectors.
+3. Run the mcp-memory read-only vector-store check and proceed only when it reports `dims: 1024` and an empty/rebuilt vector index. This is the migration gate: the indexer refuses to bind when its configured, provider-probed, and MCP dimensions differ.
+4. Replace `[embedding]` with the native Ollama `bge-m3` example in `config.toml`, remove `OPENAI_API_KEY` from the service secret file, then restart the service. Confirm the journal records matching configured and MCP dimensions before continuing.
+5. Trigger exactly one full reindex and poll its run to a final state. The full scan is required because every entity needs a new BGE-M3 vector.
+
+The commands below are identical in Bash and Fish after `INDEXER_API_TOKEN` is set with the shell-specific secure prompt shown above:
+
+```text
+curl --fail-with-body -H "Authorization: Bearer $INDEXER_API_TOKEN" \
+  -X POST https://indexer.example.com/indexer/fullscan
+curl --fail-with-body -H "Authorization: Bearer $INDEXER_API_TOKEN" \
+  https://indexer.example.com/indexer/runs/YOUR-RUN-ID
+```
+
+Do not use an incremental entity reindex as a substitute for this migration. If the provider probe or MCP dimension check fails, leave the service stopped and correct the configuration or vector-store rebuild before retrying.
+
+## Indexer MCP for semantic search and orchestration
+
+`https://indexer.example.com/indexer/mcp` is an authenticated Streamable HTTP MCP endpoint. It uses the same `Authorization: Bearer` token as the REST indexer API, embeds natural-language queries on the server, and never returns raw vectors or provider credentials. Keep `mcp-memory` configured separately for graph reads and writes.
+
+For natural-language retrieval, use `indexer_semantic_search` or `indexer_hybrid_search` rather than mcp-memory raw-vector tools. The indexer provides exactly these tools:
+
+| Tool | Use |
+| --- | --- |
+| `indexer_semantic_search` | Natural-language vector search; accepts `query`, optional `limit`, optional `entityType`. |
+| `indexer_hybrid_search` | Natural-language text-plus-vector search; accepts the same inputs. |
+| `indexer_reindex_entity` | Queue one exact `entityName`; returns a durable `runId`. |
+| `indexer_reindex_all` | Queue a durable full graph reindex; returns a `runId`. |
+| `indexer_run_status` | Read a run by `runId`. |
+
+Before production use, test this endpoint against a controlled/local target: call MCP `initialize`, `tools/list`, one semantic search, one hybrid search, one entity reindex, one full reindex, and `indexer_run_status`. Confirm bearer authentication is enforced and inspect only the normalized tool results; never send raw embeddings from a client.
 
 ## Before production use
 
-The deployed `mcp-memory` contract must be revalidated after every MCP upgrade. This checkout does not yet contain the read-only probe binary named by an older design note, so do not improvise a destructive check. In particular, verify that the target vector dimension is 384 and that the indexer has no deletion proof unless the MCP server explicitly provides one. Without that proof the service still indexes new/changed entities safely, but it deliberately does not delete vectors for missing entities.
+The deployed `mcp-memory` contract must be revalidated after every MCP upgrade. This checkout does not yet contain the read-only probe binary named by an older design note, so do not improvise a destructive check. In particular, verify that the target vector dimension equals the configured provider dimension and that the indexer has no deletion proof unless the MCP server explicitly provides one. Without that proof the service still indexes new/changed entities safely, but it deliberately does not delete vectors for missing entities.
 
 ## GitHub CI/CD
 
@@ -264,11 +301,11 @@ Deployment is manual: open **Actions → Deploy**, choose the protected environm
 
 | Symptom | First check |
 |---|---|
-| Service is not ready | `journalctl`; token file ownership/mode; MCP endpoint reachability; 384-dimension configuration. |
+| Service is not ready | `journalctl`; token file ownership/mode; MCP endpoint reachability; matching provider/MCP dimensions. |
 | `502 Bad Gateway` from nginx | `systemctl status second-brain-indexer`; nginx prefix config; local listener on `127.0.0.1:9184`. |
 | `zero size shared memory zone "indexer_api"` from nginx | Create `/etc/nginx/conf.d/second-brain-indexer-rate-limit.conf` in the `http` scope with `limit_req_zone $binary_remote_addr zone=indexer_api:10m rate=10r/m;`, then rerun `sudo nginx -t`. |
 | `401` from the indexer | Send the configured `Authorization: Bearer` token; check the token file's owner/mode and restart the service after rotation. |
 | No vectors are deleted | Expected unless MCP provides an explicit complete-read proof. |
-| Model/dimension mismatch | Prepare the MCP vector store externally first, then update indexer config and run a full scan. |
+| Model/dimension mismatch | Stop the indexer; rebuild the MCP vector store for the new dimension; verify it; update configuration; then run one full scan. |
 
 For operational detail, see [docs/runbook.md](docs/runbook.md).
