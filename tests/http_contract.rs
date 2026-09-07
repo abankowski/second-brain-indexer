@@ -961,6 +961,8 @@ async fn indexer_mcp_transport_rejects_untrusted_origins_and_invalid_envelopes()
         serde_json::json!([]),
         serde_json::json!({"jsonrpc":"1.0","id":1,"method":"tools/list"}),
         serde_json::json!({"jsonrpc":"2.0","id":null,"method":"tools/list"}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-32603,"message":"Internal error"}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"error":{"code":-32603}}),
     ] {
         let (_, body, _) = response(app.clone(), mcp_request(value)).await;
         let envelope: serde_json::Value = serde_json::from_str(&body).expect("JSON response");
@@ -980,7 +982,7 @@ async fn indexer_mcp_transport_rejects_untrusted_origins_and_invalid_envelopes()
 }
 
 #[tokio::test]
-async fn indexer_mcp_checks_origin_on_get_and_rejects_client_response_envelopes() {
+async fn indexer_mcp_checks_origin_on_get_and_accepts_client_response_envelopes() {
     let app = mcp_app(
         Arc::new(FakeState::queued()),
         true,
@@ -997,14 +999,14 @@ async fn indexer_mcp_checks_origin_on_get_and_rejects_client_response_envelopes(
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, body, _) = response(
-        app,
-        mcp_request(serde_json::json!({"jsonrpc":"2.0","id":5,"result":{}})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let envelope: serde_json::Value = serde_json::from_str(&body).expect("JSON response");
-    assert_eq!(envelope["error"]["code"], -32600);
+    for envelope in [
+        serde_json::json!({"jsonrpc":"2.0","id":5,"result":{}}),
+        serde_json::json!({"jsonrpc":"2.0","id":"request-5","error":{"code":-32603,"message":"Internal error"}}),
+    ] {
+        let (status, body, _) = response(app.clone(), mcp_request(envelope)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(body.is_empty());
+    }
 }
 
 #[tokio::test]

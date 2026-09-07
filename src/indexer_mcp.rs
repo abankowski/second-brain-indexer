@@ -158,6 +158,11 @@ where
     if object.get("jsonrpc") != Some(&json!("2.0")) {
         return invalid();
     }
+    if is_client_response(object) {
+        // MCP clients may POST responses to server-initiated requests. Streamable
+        // HTTP accepts a body containing only such responses with 202 and no body.
+        return None;
+    }
     let Some(method) = object.get("method").and_then(Value::as_str) else {
         return invalid();
     };
@@ -169,7 +174,7 @@ where
         // Notifications never invoke tools and never receive JSON-RPC replies.
         return None;
     };
-    if !(id.is_string() || id.is_i64() || id.is_u64()) {
+    if !is_valid_id(id) {
         return invalid();
     }
     let result = match method {
@@ -199,6 +204,37 @@ where
         _ => return Some(rpc_error(id.clone(), -32601, "Method not found")),
     };
     Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
+}
+
+fn is_client_response(object: &serde_json::Map<String, Value>) -> bool {
+    if object.contains_key("method") || object.contains_key("params") {
+        return false;
+    }
+    let Some(id) = object.get("id") else {
+        return false;
+    };
+    if !is_valid_id(id) {
+        return false;
+    }
+    match (object.get("result"), object.get("error")) {
+        (Some(_), None) => true,
+        (None, Some(error)) => is_valid_error(error),
+        _ => false,
+    }
+}
+
+fn is_valid_id(id: &Value) -> bool {
+    id.is_string() || id.is_i64() || id.is_u64()
+}
+
+fn is_valid_error(error: &Value) -> bool {
+    let Some(error) = error.as_object() else {
+        return false;
+    };
+    error
+        .get("code")
+        .is_some_and(|code| code.is_i64() || code.is_u64())
+        && error.get("message").is_some_and(Value::is_string)
 }
 
 #[derive(Deserialize)]
