@@ -41,6 +41,9 @@ fn deployment_assets_document_both_embedding_providers_and_the_1024_migration_ga
     assert!(readme.contains("Rebuild the mcp-memory vector store for 1024 dimensions"));
     assert!(readme.contains("vector_store_stats"));
     assert!(readme.contains("MCP-Session-Id"));
+    assert!(readme.contains("result.content[0].text"));
+    assert!(readme.contains("^data:"));
+    assert!(readme.contains("fromjson"));
     assert!(readme.contains("\"dims\":1024"));
     assert!(readme.contains("\"embeddingCount\":0"));
     assert!(readme.contains("indexer_semantic_search"));

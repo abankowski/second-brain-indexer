@@ -22,7 +22,7 @@ Run the following on the VM as a regular sudo-capable user. Unless explicitly la
 
 ```text
 sudo apt update
-sudo apt install -y build-essential ca-certificates curl git nginx openssl pkg-config libssl-dev
+sudo apt install -y build-essential ca-certificates curl git jq nginx openssl pkg-config libssl-dev
 ```
 
 ### 2. Clone and build the pinned Rust project
@@ -279,6 +279,7 @@ curl --silent --show-error --fail-with-body --dump-header "$MCP_HEADER_FILE" \
 MCP_SESSION_ID="$(awk 'tolower($1) == "mcp-session-id:" {sub(/\r$/, "", $2); print $2; exit}' "$MCP_HEADER_FILE")"
 rm -f "$MCP_HEADER_FILE"
 test -n "$MCP_SESSION_ID"
+MCP_RESPONSE_FILE="$(mktemp)"
 ```
 
 <details>
@@ -297,6 +298,7 @@ curl --silent --show-error --fail-with-body --dump-header "$MCP_HEADER_FILE" \
 set MCP_SESSION_ID (awk 'tolower($1) == "mcp-session-id:" {sub(/\r$/, "", $2); print $2; exit}' "$MCP_HEADER_FILE")
 rm -f "$MCP_HEADER_FILE"
 test -n "$MCP_SESSION_ID"; or exit 1
+set MCP_RESPONSE_FILE (mktemp)
 ```
 
 </details>
@@ -317,10 +319,44 @@ curl --silent --show-error --fail-with-body \
   -H 'Content-Type: application/json' \
   -H "MCP-Session-Id: $MCP_SESSION_ID" \
   --data '{"jsonrpc":"2.0","id":"migration-vector-stats","method":"tools/call","params":{"name":"vector_store_stats","arguments":{}}}' \
+  --output "$MCP_RESPONSE_FILE" \
   "$MCP_MEMORY_URL"
 ```
 
-Accept the gate only when the final JSON-RPC response has `"dims":1024` and `"embeddingCount":0`: `{"jsonrpc":"2.0","id":"migration-vector-stats","result":{"dims":1024,"embeddingCount":0}}` (additional result fields are allowed). An empty/rebuilt index is expected before the full reindex; any other dimension or a non-empty old index means stop and correct the rebuild.
+The response is not the stats object directly. It is either a JSON-RPC envelope or an SSE body whose final `data:` event is that envelope; the mcp-memory tool payload is the JSON string at `result.content[0].text`. Decode and verify it before continuing.
+
+In **Bash**:
+
+```bash
+MCP_ENVELOPE="$(awk '/^data:/ {sub(/^data:[[:space:]]*/, ""); last=$0} END {print last}' "$MCP_RESPONSE_FILE")"
+if [ -z "$MCP_ENVELOPE" ]; then MCP_ENVELOPE="$(cat "$MCP_RESPONSE_FILE")"; fi
+VECTOR_STORE_STATS="$(printf '%s' "$MCP_ENVELOPE" | jq -er '.result.content[0].text | fromjson')"
+if ! printf '%s\n' "$VECTOR_STORE_STATS" | jq -e '(.dims == 1024) and (.embeddingCount == 0)'; then
+  rm -f "$MCP_RESPONSE_FILE"
+  exit 1
+fi
+rm -f "$MCP_RESPONSE_FILE"
+```
+
+<details>
+<summary>Using Fish instead of Bash?</summary>
+
+```fish
+set MCP_ENVELOPE (awk '/^data:/ {sub(/^data:[[:space:]]*/, ""); last=$0} END {print last}' "$MCP_RESPONSE_FILE")
+if test -z "$MCP_ENVELOPE"
+  set MCP_ENVELOPE (string collect < "$MCP_RESPONSE_FILE")
+end
+set VECTOR_STORE_STATS (printf '%s' "$MCP_ENVELOPE" | jq -er '.result.content[0].text | fromjson')
+if not printf '%s\n' "$VECTOR_STORE_STATS" | jq -e '(.dims == 1024) and (.embeddingCount == 0)'
+  rm -f "$MCP_RESPONSE_FILE"
+  exit 1
+end
+rm -f "$MCP_RESPONSE_FILE"
+```
+
+</details>
+
+Accept the gate only when the decoded payload has `"dims":1024` and `"embeddingCount":0`, for example `{"dims":1024,"embeddingCount":0}` (additional fields are allowed). An empty/rebuilt index is expected before the full reindex; any other dimension or a non-empty old index means stop and correct the rebuild.
 
 The commands below are identical in Bash and Fish after `INDEXER_API_TOKEN` is set with the shell-specific secure prompt shown above:
 
