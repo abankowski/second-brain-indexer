@@ -1,11 +1,15 @@
-use std::{net::SocketAddr, num::NonZeroU32, path::PathBuf, time::Duration};
+use std::{net::SocketAddr, num::NonZeroU32, path::PathBuf, sync::Arc, time::Duration};
 
 use secrecy::SecretString;
 use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
 
-use crate::domain::model::{ConfigFingerprint, Dimension, DomainError};
+use crate::{
+    adapters::openai::OpenAiEmbeddingAdapter,
+    domain::model::{ConfigFingerprint, Dimension, DomainError},
+    ports::{EmbeddingError, EmbeddingProvider},
+};
 
 const MAX_MCP_BATCH_SIZE: u16 = 1024;
 
@@ -115,6 +119,19 @@ pub fn parse_toml(input: &str, secrets: &impl SecretLookup) -> Result<AppConfig,
     let raw: RawConfig =
         toml::from_str(input).map_err(|error| ConfigError::Toml(error.to_string()))?;
     raw.validate(secrets)
+}
+
+pub fn build_embedding_provider(
+    config: &EmbeddingConfig,
+) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError> {
+    match &config.engine {
+        EmbeddingEngine::OpenAiCompatible { .. } => {
+            let provider: Arc<dyn EmbeddingProvider> =
+                Arc::new(OpenAiEmbeddingAdapter::new(config)?);
+            Ok(provider)
+        }
+        EmbeddingEngine::Ollama { .. } => Err(EmbeddingError::InvalidResponse),
+    }
 }
 
 #[derive(Deserialize)]

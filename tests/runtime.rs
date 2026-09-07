@@ -4,9 +4,16 @@ use std::{
 };
 
 use async_trait::async_trait;
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::post,
+};
 use second_brain_indexer::{
     application::execute_run::ExecutionReport,
-    domain::model::{ClaimedRun, IndexedEntityState, Lease, RunId},
+    config::{EmbeddingConfig, EmbeddingEngine, build_embedding_provider},
+    domain::model::{ClaimedRun, Dimension, IndexedEntityState, Lease, RunId},
     ports::{
         CompletedWork, EnqueueOutcome, EnqueueRequest, FailedWork, RunCompletion, StageWork,
         StateError, StateRepository,
@@ -21,8 +28,12 @@ use second_brain_indexer::{
         worker::{RunProcessor, Worker},
     },
 };
+use secrecy::SecretString;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use time::OffsetDateTime;
+use tokio::net::TcpListener;
+use url::Url;
 
 #[derive(Default)]
 struct FakeState {
@@ -180,6 +191,68 @@ async fn two_worker_loops_execute_a_durable_claim_only_once() {
         first_result.expect("first worker result") || second_result.expect("second worker result")
     );
     assert_eq!(*processor.0.lock().expect("test mutex"), 1);
+}
+
+#[derive(Default)]
+struct EmbeddingRequests(Mutex<Vec<(Option<String>, Value)>>);
+
+async fn embedding_handler(
+    State(requests): State<Arc<EmbeddingRequests>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    requests.0.lock().expect("test mutex").push((
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned),
+        body,
+    ));
+    (
+        StatusCode::OK,
+        Json(json!({"data":[{"index":0,"embedding":[0.25,0.75]}]})),
+    )
+}
+
+#[tokio::test]
+async fn provider_factory_selects_openai_for_tagged_runtime_configuration() {
+    let requests = Arc::new(EmbeddingRequests::default());
+    let app = Router::new()
+        .route("/v1/embeddings", post(embedding_handler))
+        .with_state(Arc::clone(&requests));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener binds");
+    let address = listener.local_addr().expect("test listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("test server completes cleanly");
+    });
+    let config = EmbeddingConfig {
+        engine: EmbeddingEngine::OpenAiCompatible {
+            base_url: Url::parse(&format!("http://{address}/v1")).expect("test URL is valid"),
+            api_key: SecretString::from("runtime-test-key"),
+        },
+        model: "runtime-test-model".to_owned(),
+        dimensions: Dimension::parse(2).expect("test dimension is valid"),
+        max_input_chars: std::num::NonZeroU32::new(100).expect("non-zero input limit"),
+        max_input_tokens: std::num::NonZeroU32::new(100).expect("non-zero token limit"),
+    };
+
+    let embeddings = build_embedding_provider(&config)
+        .expect("factory constructs the configured provider")
+        .embed(&["runtime input".to_owned()])
+        .await
+        .expect("provider request succeeds");
+
+    assert_eq!(embeddings.len(), 1);
+    assert_eq!(embeddings[0].values(), &[0.25, 0.75]);
+    let requests = requests.0.lock().expect("test mutex");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0.as_deref(), Some("Bearer runtime-test-key"));
+    assert_eq!(requests[0].1["model"], "runtime-test-model");
+    assert_eq!(requests[0].1["input"], json!(["runtime input"]));
 }
 
 #[test]

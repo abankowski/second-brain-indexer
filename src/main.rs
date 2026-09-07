@@ -2,12 +2,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use second_brain_indexer::{
-    adapters::{
-        mcp::StreamableHttpMcpAdapter, openai::OpenAiEmbeddingAdapter,
-        sqlite::SqliteStateRepository,
-    },
+    adapters::{mcp::StreamableHttpMcpAdapter, sqlite::SqliteStateRepository},
     application::execute_run::RunExecutor,
-    config::{AppConfig, EmbeddingConfig, EmbeddingEngine, EnvironmentSecretLookup, parse_toml},
+    config::{AppConfig, EnvironmentSecretLookup, build_embedding_provider, parse_toml},
     domain::model::{ClaimedRun, RunId},
     http::{
         BearerAuth, GenerationView, HttpDependencyError, HttpQueryPort, PollingView,
@@ -58,17 +55,6 @@ fn load_config(path: &PathBuf) -> Result<AppConfig, String> {
     let source = std::fs::read_to_string(path)
         .map_err(|error| format!("could not read configuration {}: {error}", path.display()))?;
     parse_toml(&source, &EnvironmentSecretLookup).map_err(|error| error.to_string())
-}
-
-fn build_embedding_provider(
-    config: &EmbeddingConfig,
-) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError> {
-    match config.engine {
-        EmbeddingEngine::OpenAiCompatible { .. } => {
-            OpenAiEmbeddingAdapter::new(config).map(|provider| Arc::new(provider) as _)
-        }
-        EmbeddingEngine::Ollama { .. } => Err(EmbeddingError::InvalidResponse),
-    }
 }
 
 async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
