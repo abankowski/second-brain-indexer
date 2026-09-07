@@ -5,7 +5,7 @@ use second_brain_indexer::{
     adapters::{mcp::StreamableHttpMcpAdapter, sqlite::SqliteStateRepository},
     application::execute_run::RunExecutor,
     config::{AppConfig, EnvironmentSecretLookup, build_embedding_provider, parse_toml},
-    domain::model::{ClaimedRun, RunId},
+    domain::model::{ClaimedRun, Dimension, RunId},
     http::{
         BearerAuth, GenerationView, HttpDependencyError, HttpQueryPort, PollingView,
         RunSummaryView, RunView, StatsView, StatusView, router_with_shutdown_and_auth,
@@ -27,6 +27,7 @@ use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const IDLE_WORKER_DELAY: Duration = Duration::from_millis(100);
+const STARTUP_EMBEDDING_PROBE: &str = "second-brain-indexer startup embedding probe";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -84,6 +85,7 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         "MCP session established and vector-store dimension verified"
     );
     let embedding = build_embedding_provider(&config.embedding)?;
+    probe_embedding(&*embedding, config.embedding.dimensions).await?;
     let shutdown = Shutdown::new();
     let metrics = Arc::new(Metrics::default());
     let query = Arc::new(RuntimeQuery::new(
@@ -161,6 +163,19 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         task.abort();
     }
     Ok(())
+}
+
+async fn probe_embedding(
+    provider: &dyn EmbeddingProvider,
+    expected: Dimension,
+) -> Result<(), EmbeddingError> {
+    let embeddings = provider
+        .embed(&[STARTUP_EMBEDDING_PROBE.to_owned()])
+        .await?;
+    match embeddings.as_slice() {
+        [embedding] if embedding.values().len() == expected.get() as usize => Ok(()),
+        _ => Err(EmbeddingError::InvalidResponse),
+    }
 }
 
 fn initialise_logging() {
@@ -408,15 +423,29 @@ fn run_view(row: sqlx::sqlite::SqliteRow) -> Result<RunView, HttpDependencyError
 mod tests {
     use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
+    use async_trait::async_trait;
     use second_brain_indexer::{
         config::{EmbeddingConfig, EmbeddingEngine},
-        domain::model::Dimension,
-        ports::EmbeddingError,
+        domain::model::{Dimension, Embedding},
+        ports::{EmbeddingError, EmbeddingProvider},
     };
     use secrecy::SecretString;
     use url::Url;
 
-    use super::{LogFormat, build_embedding_provider, log_format, startup_ready_message};
+    use super::{
+        LogFormat, build_embedding_provider, log_format, probe_embedding, startup_ready_message,
+    };
+
+    struct FixedDimensionProvider(Dimension);
+
+    #[async_trait]
+    impl EmbeddingProvider for FixedDimensionProvider {
+        async fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, EmbeddingError> {
+            Embedding::new(vec![0.0; self.0.get() as usize], self.0)
+                .map(|embedding| vec![embedding])
+                .map_err(|_| EmbeddingError::InvalidResponse)
+        }
+    }
 
     #[test]
     fn startup_message_reports_listener_dimension_and_polling_state() {
@@ -435,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_factory_rejects_ollama_until_its_native_adapter_is_available() {
+    fn provider_factory_constructs_the_native_ollama_engine() {
         let config = EmbeddingConfig {
             engine: EmbeddingEngine::Ollama {
                 base_url: Url::parse("http://127.0.0.1:11434").expect("test URL is valid"),
@@ -446,10 +475,7 @@ mod tests {
             max_input_tokens: NonZeroU32::new(8_192).expect("non-zero token limit"),
         };
 
-        assert!(matches!(
-            build_embedding_provider(&config),
-            Err(EmbeddingError::InvalidResponse)
-        ));
+        assert!(build_embedding_provider(&config).is_ok());
     }
 
     #[test]
@@ -466,5 +492,17 @@ mod tests {
         };
 
         assert!(build_embedding_provider(&config).is_ok());
+    }
+
+    #[tokio::test]
+    async fn startup_probe_rejects_a_provider_dimension_that_does_not_match_configuration() {
+        let expected = Dimension::parse(2).expect("test dimension is valid");
+        let provider =
+            FixedDimensionProvider(Dimension::parse(3).expect("test dimension is valid"));
+
+        assert!(matches!(
+            probe_embedding(&provider, expected).await,
+            Err(EmbeddingError::InvalidResponse)
+        ));
     }
 }

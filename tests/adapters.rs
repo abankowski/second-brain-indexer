@@ -8,7 +8,10 @@ use axum::{
     routing::post,
 };
 use second_brain_indexer::{
-    adapters::{mcp::StreamableHttpMcpAdapter, openai::OpenAiEmbeddingAdapter},
+    adapters::{
+        mcp::StreamableHttpMcpAdapter, ollama::OllamaEmbeddingAdapter,
+        openai::OpenAiEmbeddingAdapter,
+    },
     config::{EmbeddingConfig, EmbeddingEngine, McpConfig, McpTransport},
     domain::model::{DeletionProof, Dimension, Embedding, EntityName},
     ports::{EmbeddingError, EmbeddingProvider, McpMemoryPort, VectorWrite},
@@ -72,6 +75,16 @@ fn embedding_config(base_url: Url) -> EmbeddingConfig {
             api_key: SecretString::from("openai-secret"),
         },
         model: "test-model".to_owned(),
+        dimensions: Dimension::parse(2).expect("test dimension is valid"),
+        max_input_chars: std::num::NonZeroU32::new(100).expect("non-zero chars"),
+        max_input_tokens: std::num::NonZeroU32::new(100).expect("non-zero tokens"),
+    }
+}
+
+fn ollama_embedding_config(base_url: Url) -> EmbeddingConfig {
+    EmbeddingConfig {
+        engine: EmbeddingEngine::Ollama { base_url },
+        model: "bge-m3".to_owned(),
         dimensions: Dimension::parse(2).expect("test dimension is valid"),
         max_input_chars: std::num::NonZeroU32::new(100).expect("non-zero chars"),
         max_input_tokens: std::num::NonZeroU32::new(100).expect("non-zero tokens"),
@@ -304,6 +317,61 @@ async fn openai_adapter_sends_auth_and_restores_response_index_order() {
     assert_eq!(requests[0].body["input"], json!(["first", "second"]));
     assert_eq!(requests[0].body["encoding_format"], "float");
     assert_eq!(requests[0].body["dimensions"], 2);
+}
+
+#[tokio::test]
+async fn ollama_adapter_posts_ordered_batch_without_authorization() {
+    let requests = RecordedRequests::default();
+    let base_url = serve(
+        Router::new()
+            .route(
+                "/api/embed",
+                post(
+                    |State(requests): State<RecordedRequests>,
+                     headers: HeaderMap,
+                     Json(body): Json<Value>| async move {
+                        record(headers, body, &requests).await;
+                        Json(json!({"embeddings":[[1.0, 1.1], [2.0, 2.1]]}))
+                    },
+                ),
+            )
+            .with_state(requests.clone()),
+    )
+    .await;
+    let adapter =
+        OllamaEmbeddingAdapter::new(&ollama_embedding_config(base_url)).expect("adapter builds");
+
+    let embeddings = adapter
+        .embed(&["first".to_owned(), "second".to_owned()])
+        .await
+        .expect("embedding request succeeds");
+
+    assert_eq!(embeddings[0].values(), &[1.0, 1.1]);
+    assert_eq!(embeddings[1].values(), &[2.0, 2.1]);
+    let requests = requests.0.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].authorization, None);
+    assert_eq!(requests[0].body["model"], "bge-m3");
+    assert_eq!(requests[0].body["input"], json!(["first", "second"]));
+    assert_eq!(requests[0].body["truncate"], false);
+}
+
+#[tokio::test]
+async fn ollama_adapter_rejects_a_response_with_the_wrong_embedding_cardinality() {
+    let base_url = serve(Router::new().route(
+        "/api/embed",
+        post(|| async { Json(json!({"embeddings":[[1.0, 1.1]]})) }),
+    ))
+    .await;
+    let adapter =
+        OllamaEmbeddingAdapter::new(&ollama_embedding_config(base_url)).expect("adapter builds");
+
+    let error = adapter
+        .embed(&["first".to_owned(), "second".to_owned()])
+        .await
+        .expect_err("a response with fewer vectors is invalid");
+
+    assert!(matches!(error, EmbeddingError::InvalidResponse));
 }
 
 #[tokio::test]

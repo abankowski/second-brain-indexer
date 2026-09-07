@@ -6,6 +6,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::{
+    adapters::ollama::OllamaEmbeddingAdapter,
     adapters::openai::OpenAiEmbeddingAdapter,
     domain::model::{ConfigFingerprint, Dimension, DomainError},
     ports::{EmbeddingError, EmbeddingProvider},
@@ -130,7 +131,11 @@ pub fn build_embedding_provider(
                 Arc::new(OpenAiEmbeddingAdapter::new(config)?);
             Ok(provider)
         }
-        EmbeddingEngine::Ollama { .. } => Err(EmbeddingError::InvalidResponse),
+        EmbeddingEngine::Ollama { .. } => {
+            let provider: Arc<dyn EmbeddingProvider> =
+                Arc::new(OllamaEmbeddingAdapter::new(config)?);
+            Ok(provider)
+        }
     }
 }
 
@@ -290,7 +295,7 @@ fn embedding_engine(
         .as_ref()
         .or(raw.openai_base_url.as_ref())
         .ok_or(ConfigError::Blank("embedding.base_url"))?;
-    let base_url = parse_http_url("embedding.base_url", &base_url)?;
+    let base_url = parse_http_url("embedding.base_url", base_url)?;
 
     match raw.provider.as_deref().unwrap_or("openai-compatible") {
         "openai-compatible" => {
