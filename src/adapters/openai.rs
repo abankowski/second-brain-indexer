@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
-    config::EmbeddingConfig,
+    config::{EmbeddingConfig, EmbeddingEngine},
     domain::model::{Dimension, Embedding},
     ports::{EmbeddingError, EmbeddingProvider},
 };
@@ -23,7 +23,12 @@ impl OpenAiEmbeddingAdapter {
         let client = Client::builder()
             .build()
             .map_err(|_| EmbeddingError::Transport)?;
-        let mut base_url = config.openai_base_url.clone();
+        let (mut base_url, api_key) = match &config.engine {
+            EmbeddingEngine::OpenAiCompatible { base_url, api_key } => {
+                (base_url.clone(), api_key.clone())
+            }
+            EmbeddingEngine::Ollama { .. } => return Err(EmbeddingError::InvalidResponse),
+        };
         if !base_url.path().ends_with('/') {
             base_url.set_path(&format!("{}/", base_url.path()));
         }
@@ -33,7 +38,7 @@ impl OpenAiEmbeddingAdapter {
         Ok(Self {
             client,
             endpoint,
-            api_key: config.api_key.clone(),
+            api_key,
             model: config.model.clone(),
             dimension: config.dimensions,
         })
@@ -131,8 +136,14 @@ struct EmbeddingResponseItem {
 
 #[cfg(test)]
 mod tests {
-    use super::{EmbeddingResponseItem, ordered_embeddings};
-    use crate::domain::model::Dimension;
+    use super::{EmbeddingResponseItem, OpenAiEmbeddingAdapter, ordered_embeddings};
+    use crate::{
+        config::{EmbeddingConfig, EmbeddingEngine},
+        domain::model::Dimension,
+        ports::EmbeddingError,
+    };
+    use std::num::NonZeroU32;
+    use url::Url;
 
     #[test]
     fn restores_response_index_order() {
@@ -154,6 +165,24 @@ mod tests {
         .expect("response has all indexed vectors");
         assert_eq!(embeddings[0].values(), &[1.0, 1.1]);
         assert_eq!(embeddings[1].values(), &[2.0, 2.1]);
+    }
+
+    #[test]
+    fn rejects_an_ollama_configuration() {
+        let config = EmbeddingConfig {
+            engine: EmbeddingEngine::Ollama {
+                base_url: Url::parse("http://127.0.0.1:11434").expect("test URL is valid"),
+            },
+            model: "bge-m3".to_owned(),
+            dimensions: Dimension::parse(1024).expect("test dimension is valid"),
+            max_input_chars: NonZeroU32::new(24_000).expect("non-zero input limit"),
+            max_input_tokens: NonZeroU32::new(8_192).expect("non-zero token limit"),
+        };
+
+        assert!(matches!(
+            OpenAiEmbeddingAdapter::new(&config),
+            Err(EmbeddingError::InvalidResponse)
+        ));
     }
 
     #[test]

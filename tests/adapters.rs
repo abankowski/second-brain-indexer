@@ -9,7 +9,7 @@ use axum::{
 };
 use second_brain_indexer::{
     adapters::{mcp::StreamableHttpMcpAdapter, openai::OpenAiEmbeddingAdapter},
-    config::{EmbeddingConfig, McpConfig, McpTransport},
+    config::{EmbeddingConfig, EmbeddingEngine, McpConfig, McpTransport},
     domain::model::{DeletionProof, Dimension, Embedding, EntityName},
     ports::{EmbeddingError, EmbeddingProvider, McpMemoryPort, VectorWrite},
 };
@@ -67,12 +67,14 @@ fn mcp_config(endpoint: Url) -> McpConfig {
 
 fn embedding_config(base_url: Url) -> EmbeddingConfig {
     EmbeddingConfig {
+        engine: EmbeddingEngine::OpenAiCompatible {
+            base_url,
+            api_key: SecretString::from("openai-secret"),
+        },
         model: "test-model".to_owned(),
         dimensions: Dimension::parse(2).expect("test dimension is valid"),
         max_input_chars: std::num::NonZeroU32::new(100).expect("non-zero chars"),
         max_input_tokens: std::num::NonZeroU32::new(100).expect("non-zero tokens"),
-        openai_base_url: base_url,
-        api_key: SecretString::from("openai-secret"),
     }
 }
 

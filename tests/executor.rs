@@ -7,7 +7,10 @@ use std::{
 use async_trait::async_trait;
 use second_brain_indexer::{
     application::execute_run::{ExecuteRunError, RunExecutor},
-    config::{EmbeddingConfig, McpConfig, McpTransport, RepresentationConfig, RetryConfig},
+    config::{
+        EmbeddingConfig, EmbeddingEngine, McpConfig, McpTransport, RepresentationConfig,
+        RetryConfig,
+    },
     domain::model::{
         ClaimedRun, DeletionProof, Dimension, Embedding, EntityName, EntityType, GraphEntity,
         GraphSnapshot, Lease, RunId, Selector,
@@ -65,12 +68,14 @@ fn mcp_config(batch_size: u16) -> McpConfig {
 
 fn embedding_config() -> EmbeddingConfig {
     EmbeddingConfig {
+        engine: EmbeddingEngine::OpenAiCompatible {
+            base_url: Url::parse("https://example.test/v1/").expect("test URL is valid"),
+            api_key: SecretString::from("not-a-real-secret"),
+        },
         model: "test-model".to_owned(),
         dimensions: Dimension::parse(2).expect("test dimension is valid"),
         max_input_chars: NonZeroU32::new(100).expect("non-zero chars"),
         max_input_tokens: NonZeroU32::new(100).expect("non-zero tokens"),
-        openai_base_url: Url::parse("https://example.test/v1/").expect("test URL is valid"),
-        api_key: SecretString::from("not-a-real-secret"),
     }
 }
 

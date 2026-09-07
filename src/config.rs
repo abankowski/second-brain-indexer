@@ -77,12 +77,22 @@ pub enum McpTransport {
 }
 #[derive(Clone, Debug)]
 pub struct EmbeddingConfig {
+    pub engine: EmbeddingEngine,
     pub model: String,
     pub dimensions: Dimension,
     pub max_input_chars: NonZeroU32,
     pub max_input_tokens: NonZeroU32,
-    pub openai_base_url: Url,
-    pub api_key: SecretString,
+}
+
+#[derive(Clone, Debug)]
+pub enum EmbeddingEngine {
+    OpenAiCompatible {
+        base_url: Url,
+        api_key: SecretString,
+    },
+    Ollama {
+        base_url: Url,
+    },
 }
 #[derive(Clone, Debug)]
 pub struct RepresentationConfig {
@@ -146,12 +156,14 @@ struct RawMcpConfig {
 }
 #[derive(Deserialize)]
 struct RawEmbeddingConfig {
+    provider: Option<String>,
     model: String,
     dimensions: u32,
     max_input_chars: u32,
     max_input_tokens: u32,
-    openai_base_url: String,
-    api_key_env: String,
+    base_url: Option<String>,
+    openai_base_url: Option<String>,
+    api_key_env: Option<String>,
 }
 #[derive(Deserialize)]
 struct RawRepresentationConfig {
@@ -185,8 +197,7 @@ impl RawConfig {
         )?;
         let max_attempts = non_zero(self.retry.max_attempts, "retry.max_attempts")?;
         let endpoint = parse_http_url("mcp.endpoint", &self.mcp.endpoint)?;
-        let openai_base_url =
-            parse_http_url("embedding.openai_base_url", &self.embedding.openai_base_url)?;
+        let engine = embedding_engine(&self.embedding, secrets)?;
         if self.mcp.batch_size == 0 || self.mcp.batch_size > MAX_MCP_BATCH_SIZE {
             return Err(ConfigError::InvalidBatchSize(self.mcp.batch_size));
         }
@@ -224,12 +235,11 @@ impl RawConfig {
                 bearer_token: required_secret(secrets, &self.mcp.bearer_token_env)?,
             },
             embedding: EmbeddingConfig {
+                engine,
                 model: required("embedding.model", self.embedding.model)?,
                 dimensions,
                 max_input_chars,
                 max_input_tokens,
-                openai_base_url,
-                api_key: required_secret(secrets, &self.embedding.api_key_env)?,
             },
             representation: RepresentationConfig {
                 version: required("representation.version", self.representation.version)?,
@@ -251,6 +261,34 @@ impl RawConfig {
                 bearer_token,
             },
         })
+    }
+}
+
+fn embedding_engine(
+    raw: &RawEmbeddingConfig,
+    secrets: &impl SecretLookup,
+) -> Result<EmbeddingEngine, ConfigError> {
+    let base_url = raw
+        .base_url
+        .as_ref()
+        .or(raw.openai_base_url.as_ref())
+        .ok_or(ConfigError::Blank("embedding.base_url"))?;
+    let base_url = parse_http_url("embedding.base_url", &base_url)?;
+
+    match raw.provider.as_deref().unwrap_or("openai-compatible") {
+        "openai-compatible" => {
+            let api_key_env = raw
+                .api_key_env
+                .as_deref()
+                .ok_or(ConfigError::Blank("embedding.api_key_env"))?;
+            Ok(EmbeddingEngine::OpenAiCompatible {
+                base_url,
+                api_key: required_secret(secrets, api_key_env)?,
+            })
+        }
+        "ollama" if raw.api_key_env.is_none() => Ok(EmbeddingEngine::Ollama { base_url }),
+        "ollama" => Err(ConfigError::OllamaApiKeyForbidden),
+        value => Err(ConfigError::UnsupportedEmbeddingProvider(value.to_owned())),
     }
 }
 
@@ -327,6 +365,10 @@ pub enum ConfigError {
     InvalidSocketAddress { field: &'static str, value: String },
     #[error("unsupported MCP transport: {0}")]
     UnsupportedMcpTransport(String),
+    #[error("unsupported embedding provider: {0}")]
+    UnsupportedEmbeddingProvider(String),
+    #[error("embedding.api_key_env is not supported for the ollama provider")]
+    OllamaApiKeyForbidden,
     #[error("mcp.batch_size must be in 1..=1024, got {0}")]
     InvalidBatchSize(u16),
     #[error("required secret is unavailable: {0}")]
@@ -345,7 +387,7 @@ pub enum ConfigError {
 
 #[cfg(test)]
 mod tests {
-    use super::{SecretLookup, parse_toml};
+    use super::{EmbeddingEngine, SecretLookup, parse_toml};
     use secrecy::{ExposeSecret, SecretString};
     use std::collections::BTreeMap;
 
@@ -409,6 +451,69 @@ idempotency_ttl_hours = 24
     #[test]
     fn parses_target_compatible_configuration() {
         assert!(parse_toml(&config(), &secrets()).is_ok());
+    }
+
+    #[test]
+    fn parses_ollama_configuration_without_an_api_key() {
+        let input = config().replace(
+            r#"model = "target-compatible-model"
+dimensions = 384
+max_input_chars = 24000
+max_input_tokens = 8192
+openai_base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY""#,
+            r#"provider = "ollama"
+model = "bge-m3"
+dimensions = 1024
+max_input_chars = 24000
+max_input_tokens = 8192
+base_url = "http://127.0.0.1:11434""#,
+        );
+
+        let parsed = parse_toml(&input, &secrets()).expect("Ollama configuration parses");
+
+        assert!(matches!(
+            parsed.embedding.engine,
+            EmbeddingEngine::Ollama { .. }
+        ));
+    }
+
+    #[test]
+    fn requires_an_api_key_for_openai_compatible_configuration() {
+        let input = config().replace("api_key_env = \"OPENAI_API_KEY\"\n", "");
+
+        assert!(parse_toml(&input, &secrets()).is_err());
+    }
+
+    #[test]
+    fn maps_legacy_openai_base_url_to_an_openai_compatible_engine() {
+        let parsed = parse_toml(&config(), &secrets()).expect("legacy configuration parses");
+
+        assert!(matches!(
+            parsed.embedding.engine,
+            EmbeddingEngine::OpenAiCompatible { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_an_api_key_for_ollama() {
+        let input = config().replace(
+            r#"model = "target-compatible-model"
+dimensions = 384
+max_input_chars = 24000
+max_input_tokens = 8192
+openai_base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY""#,
+            r#"provider = "ollama"
+model = "bge-m3"
+dimensions = 1024
+max_input_chars = 24000
+max_input_tokens = 8192
+base_url = "http://127.0.0.1:11434"
+api_key_env = "OPENAI_API_KEY""#,
+        );
+
+        assert!(parse_toml(&input, &secrets()).is_err());
     }
     #[test]
     fn rejects_invalid_dimension_before_any_network_call() {
