@@ -24,6 +24,39 @@ use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::Mutex};
 use url::Url;
 
+const MCP_MEMORY_QUERY_TOOLS_CONTRACT: &str = r#"
+{
+  "tools": [
+    {
+      "name": "vector_search_entities",
+      "inputSchema": {
+        "type": "object",
+        "required": ["embedding"],
+        "properties": {
+          "embedding": {"type": "array", "items": {"type": "number"}},
+          "entityType": {"type": "string"},
+          "topK": {"type": "integer", "minimum": 1, "maximum": 100}
+        }
+      }
+    },
+    {
+      "name": "hybrid_search",
+      "inputSchema": {
+        "type": "object",
+        "required": ["queryEmbedding", "queryText"],
+        "properties": {
+          "queryEmbedding": {"type": "array", "items": {"type": "number"}},
+          "queryText": {"type": "string"},
+          "textWeight": {"type": "number"},
+          "vecWeight": {"type": "number"},
+          "topK": {"type": "integer", "minimum": 1, "maximum": 100}
+        }
+      }
+    }
+  ]
+}
+"#;
+
 #[derive(Clone, Default)]
 struct RecordedRequests(Arc<Mutex<Vec<RecordedRequest>>>);
 
@@ -334,6 +367,161 @@ async fn mcp_adapter_normalizes_semantic_and_hybrid_query_fixtures() {
             "topK": 2,
         })
     );
+}
+
+#[test]
+fn checked_synthetic_fixture_locks_the_mcp_memory_query_tool_contract() {
+    let contract: Value = serde_json::from_str(MCP_MEMORY_QUERY_TOOLS_CONTRACT)
+        .expect("synthetic tool contract fixture is JSON");
+    let tools = contract["tools"].as_array().expect("tools are an array");
+    let semantic = tools
+        .iter()
+        .find(|tool| tool["name"] == "vector_search_entities")
+        .expect("semantic tool is advertised");
+    let hybrid = tools
+        .iter()
+        .find(|tool| tool["name"] == "hybrid_search")
+        .expect("hybrid tool is advertised");
+
+    assert_eq!(semantic["inputSchema"]["required"], json!(["embedding"]));
+    assert_eq!(
+        semantic["inputSchema"]["properties"],
+        json!({
+            "embedding": {"type": "array", "items": {"type": "number"}},
+            "entityType": {"type": "string"},
+            "topK": {"type": "integer", "minimum": 1, "maximum": 100},
+        })
+    );
+    assert_eq!(
+        hybrid["inputSchema"]["required"],
+        json!(["queryEmbedding", "queryText"])
+    );
+    assert_eq!(
+        hybrid["inputSchema"]["properties"],
+        json!({
+            "queryEmbedding": {"type": "array", "items": {"type": "number"}},
+            "queryText": {"type": "string"},
+            "textWeight": {"type": "number"},
+            "vecWeight": {"type": "number"},
+            "topK": {"type": "integer", "minimum": 1, "maximum": 100},
+        })
+    );
+}
+
+#[tokio::test]
+async fn mcp_adapter_omits_optional_query_arguments_when_they_are_none() {
+    let requests = RecordedRequests::default();
+    let endpoint = serve(
+        Router::new()
+            .route("/", post(mcp_query_handler))
+            .with_state(requests.clone()),
+    )
+    .await;
+    let adapter = StreamableHttpMcpAdapter::new(&mcp_config(endpoint)).expect("adapter builds");
+    let embedding = Embedding::new(
+        vec![0.0; 2],
+        Dimension::parse(2).expect("test dimension is valid"),
+    )
+    .expect("embedding is valid");
+
+    adapter
+        .semantic_search(&embedding, None, None)
+        .await
+        .expect("semantic query succeeds");
+    adapter
+        .hybrid_search(&embedding, "synthetic fixture", None)
+        .await
+        .expect("hybrid query succeeds");
+
+    let requests = requests.0.lock().await;
+    assert_eq!(
+        requests[2].body["params"]["arguments"],
+        json!({"embedding": [0.0, 0.0]})
+    );
+    assert_eq!(
+        requests[3].body["params"]["arguments"],
+        json!({"queryEmbedding": [0.0, 0.0], "queryText": "synthetic fixture"})
+    );
+}
+
+#[tokio::test]
+async fn mcp_adapter_rejects_out_of_range_query_limits_before_making_an_http_call() {
+    let requests = RecordedRequests::default();
+    let endpoint = serve(
+        Router::new()
+            .route("/", post(mcp_query_handler))
+            .with_state(requests.clone()),
+    )
+    .await;
+    let adapter = StreamableHttpMcpAdapter::new(&mcp_config(endpoint)).expect("adapter builds");
+    let embedding = Embedding::new(
+        vec![0.0; 2],
+        Dimension::parse(2).expect("test dimension is valid"),
+    )
+    .expect("embedding is valid");
+
+    assert!(matches!(
+        adapter.semantic_search(&embedding, None, Some(0)).await,
+        Err(McpError::InvalidResponse)
+    ));
+    assert!(matches!(
+        adapter
+            .hybrid_search(&embedding, "synthetic fixture", Some(101))
+            .await,
+        Err(McpError::InvalidResponse)
+    ));
+    assert!(requests.0.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn mcp_adapter_rejects_successful_hybrid_payloads_with_wrong_count_or_field_type() {
+    async fn handler(Json(body): Json<Value>) -> Response<Body> {
+        match body["method"].as_str() {
+            Some("initialize") => Response::builder()
+                .header("mcp-session-id", "session-hybrid-malformed")
+                .body(Body::from(
+                    json!({"jsonrpc":"2.0", "id":body["id"], "result":{}}).to_string(),
+                ))
+                .expect("initialize response is valid"),
+            Some("notifications/initialized") => Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .body(Body::empty())
+                .expect("notification response is valid"),
+            Some("tools/call") => {
+                let payload = match body["params"]["arguments"]["queryText"].as_str() {
+                    Some("synthetic-count") => json!({
+                        "results":[{"name":"fixture","entityType":"Projekt","score":0.8,"textScore":0.7,"vecScore":0.9}],
+                        "count":2,
+                    }),
+                    Some("synthetic-type") => json!({
+                        "results":[{"name":"fixture","entityType":"Projekt","score":0.8,"textScore":"wrong","vecScore":0.9}],
+                        "count":1,
+                    }),
+                    _ => json!({}),
+                };
+                mcp_json_response(body["id"].clone(), payload)
+            }
+            _ => Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .expect("bad request response is valid"),
+        }
+    }
+
+    let endpoint = serve(Router::new().route("/", post(handler))).await;
+    let adapter = StreamableHttpMcpAdapter::new(&mcp_config(endpoint)).expect("adapter builds");
+    let embedding = Embedding::new(
+        vec![0.0; 2],
+        Dimension::parse(2).expect("test dimension is valid"),
+    )
+    .expect("embedding is valid");
+
+    for query_text in ["synthetic-count", "synthetic-type"] {
+        assert!(matches!(
+            adapter.hybrid_search(&embedding, query_text, None).await,
+            Err(McpError::InvalidResponse)
+        ));
+    }
 }
 
 #[tokio::test]
