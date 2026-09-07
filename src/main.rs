@@ -7,13 +7,13 @@ use second_brain_indexer::{
         sqlite::SqliteStateRepository,
     },
     application::execute_run::RunExecutor,
-    config::{AppConfig, EnvironmentSecretLookup, parse_toml},
+    config::{AppConfig, EmbeddingConfig, EmbeddingEngine, EnvironmentSecretLookup, parse_toml},
     domain::model::{ClaimedRun, RunId},
     http::{
         BearerAuth, GenerationView, HttpDependencyError, HttpQueryPort, PollingView,
         RunSummaryView, RunView, StatsView, StatusView, router_with_shutdown_and_auth,
     },
-    ports::McpMemoryPort,
+    ports::{EmbeddingError, EmbeddingProvider, McpMemoryPort},
     runtime::{
         bootstrap::Bootstrap,
         logging::record_execution_report,
@@ -60,6 +60,17 @@ fn load_config(path: &PathBuf) -> Result<AppConfig, String> {
     parse_toml(&source, &EnvironmentSecretLookup).map_err(|error| error.to_string())
 }
 
+fn build_embedding_provider(
+    config: &EmbeddingConfig,
+) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError> {
+    match config.engine {
+        EmbeddingEngine::OpenAiCompatible { .. } => {
+            OpenAiEmbeddingAdapter::new(config).map(|provider| Arc::new(provider) as _)
+        }
+        EmbeddingEngine::Ollama { .. } => Err(EmbeddingError::InvalidResponse),
+    }
+}
+
 async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(
         SqliteStateRepository::connect(&config.state.database_path, config.state.lease_duration)
@@ -86,7 +97,7 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         configured_dimension = config.embedding.dimensions.get(),
         "MCP session established and vector-store dimension verified"
     );
-    let embedding = Arc::new(OpenAiEmbeddingAdapter::new(&config.embedding)?);
+    let embedding = build_embedding_provider(&config.embedding)?;
     let shutdown = Shutdown::new();
     let metrics = Arc::new(Metrics::default());
     let query = Arc::new(RuntimeQuery::new(
@@ -235,7 +246,7 @@ async fn wait_for_shutdown(shutdown: Shutdown) {
 struct ProductionProcessor {
     state: Arc<SqliteStateRepository>,
     mcp: Arc<StreamableHttpMcpAdapter>,
-    embedding: Arc<OpenAiEmbeddingAdapter>,
+    embedding: Arc<dyn EmbeddingProvider>,
     metrics: Arc<Metrics>,
     config: AppConfig,
 }
@@ -243,9 +254,10 @@ struct ProductionProcessor {
 #[async_trait]
 impl RunProcessor for ProductionProcessor {
     async fn execute(&self, claimed: ClaimedRun) -> Result<(), String> {
+        let embedding = ProviderRef(&*self.embedding);
         RunExecutor::new(
             &*self.mcp,
-            &*self.embedding,
+            &embedding,
             &*self.state,
             &self.config.mcp,
             &self.config.embedding,
@@ -256,6 +268,18 @@ impl RunProcessor for ProductionProcessor {
         .await
         .map(|report| record_execution_report(&self.metrics, &report))
         .map_err(|error| error.to_string())
+    }
+}
+
+struct ProviderRef<'a>(&'a dyn EmbeddingProvider);
+
+#[async_trait]
+impl EmbeddingProvider for ProviderRef<'_> {
+    async fn embed(
+        &self,
+        inputs: &[String],
+    ) -> Result<Vec<second_brain_indexer::domain::model::Embedding>, EmbeddingError> {
+        self.0.embed(inputs).await
     }
 }
 
@@ -396,9 +420,17 @@ fn run_view(row: sqlx::sqlite::SqliteRow) -> Result<RunView, HttpDependencyError
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, time::Duration};
+    use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
-    use super::{LogFormat, log_format, startup_ready_message};
+    use second_brain_indexer::{
+        config::{EmbeddingConfig, EmbeddingEngine},
+        domain::model::Dimension,
+        ports::EmbeddingError,
+    };
+    use secrecy::SecretString;
+    use url::Url;
+
+    use super::{LogFormat, build_embedding_provider, log_format, startup_ready_message};
 
     #[test]
     fn startup_message_reports_listener_dimension_and_polling_state() {
@@ -414,5 +446,39 @@ mod tests {
     fn direct_execution_defaults_to_text_and_json_is_opt_in() {
         assert_eq!(log_format(None), LogFormat::Text);
         assert_eq!(log_format(Some("json")), LogFormat::Json);
+    }
+
+    #[test]
+    fn provider_factory_rejects_ollama_until_its_native_adapter_is_available() {
+        let config = EmbeddingConfig {
+            engine: EmbeddingEngine::Ollama {
+                base_url: Url::parse("http://127.0.0.1:11434").expect("test URL is valid"),
+            },
+            model: "bge-m3".to_owned(),
+            dimensions: Dimension::parse(1024).expect("test dimension is valid"),
+            max_input_chars: NonZeroU32::new(24_000).expect("non-zero input limit"),
+            max_input_tokens: NonZeroU32::new(8_192).expect("non-zero token limit"),
+        };
+
+        assert!(matches!(
+            build_embedding_provider(&config),
+            Err(EmbeddingError::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn provider_factory_constructs_the_openai_compatible_engine() {
+        let config = EmbeddingConfig {
+            engine: EmbeddingEngine::OpenAiCompatible {
+                base_url: Url::parse("https://api.openai.com/v1").expect("test URL is valid"),
+                api_key: SecretString::from("test-secret"),
+            },
+            model: "text-embedding-3-small".to_owned(),
+            dimensions: Dimension::parse(384).expect("test dimension is valid"),
+            max_input_chars: NonZeroU32::new(24_000).expect("non-zero input limit"),
+            max_input_tokens: NonZeroU32::new(8_192).expect("non-zero token limit"),
+        };
+
+        assert!(build_embedding_provider(&config).is_ok());
     }
 }
