@@ -10,6 +10,7 @@ use second_brain_indexer::{
         BearerAuth, GenerationView, HttpDependencyError, HttpQueryPort, PollingView,
         RunSummaryView, RunView, StatsView, StatusView, router_with_shutdown_and_auth,
     },
+    indexer_mcp::indexer_mcp_router,
     ports::{EmbeddingError, EmbeddingProvider, McpMemoryPort},
     runtime::{
         bind_after_embedding_probe,
@@ -92,19 +93,30 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         config.clone(),
         shutdown.clone(),
     ));
+    let idempotency_ttl = time::Duration::try_from(config.api.idempotency_ttl)
+        .map_err(|_| "idempotency TTL is outside the supported range")?;
+    let auth = config
+        .api
+        .bearer_token
+        .clone()
+        .map_or_else(BearerAuth::disabled, BearerAuth::enabled);
     let app = router_with_shutdown_and_auth(
         Arc::clone(&state),
         Arc::clone(&mcp),
-        query,
-        time::Duration::try_from(config.api.idempotency_ttl)
-            .map_err(|_| "idempotency TTL is outside the supported range")?,
+        Arc::clone(&query),
+        idempotency_ttl,
         shutdown.clone(),
-        config
-            .api
-            .bearer_token
-            .clone()
-            .map_or_else(BearerAuth::disabled, BearerAuth::enabled),
-    );
+        auth.clone(),
+    )
+    .merge(indexer_mcp_router(
+        Arc::clone(&state),
+        Arc::clone(&mcp),
+        query,
+        Arc::clone(&embedding),
+        idempotency_ttl,
+        shutdown.clone(),
+        auth,
+    ));
     let address = config.server.bind;
     let listener =
         bind_after_embedding_probe(&*embedding, config.embedding.dimensions, address).await?;

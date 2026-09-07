@@ -7,7 +7,8 @@ use axum::{
 };
 use second_brain_indexer::{
     domain::model::{
-        ClaimedRun, EntityName, EntityType, GraphEntity, GraphSnapshot, Lease, RunId, Selector,
+        ClaimedRun, Dimension, Embedding, EntityName, EntityType, GraphEntity, GraphSnapshot,
+        Lease, RunId, Selector,
     },
     http::{
         BearerAuth, GenerationView, HttpDependencyError, HttpQueryPort, PollingView,
@@ -15,8 +16,9 @@ use second_brain_indexer::{
         router_with_shutdown,
     },
     ports::{
-        BatchWriteResult, CompletedWork, EnqueueOutcome, EnqueueRequest, FailedWork, McpError,
-        McpMemoryPort, RunCompletion, StageWork, StateError, StateRepository, VectorWrite,
+        BatchWriteResult, CompletedWork, EmbeddingError, EmbeddingProvider, EnqueueOutcome,
+        EnqueueRequest, FailedWork, HybridQueryResult, McpError, McpMemoryPort, RunCompletion,
+        SemanticQueryResult, StageWork, StateError, StateRepository, VectorWrite,
     },
     runtime::shutdown::Shutdown,
 };
@@ -143,6 +145,64 @@ impl McpMemoryPort for FakeMcp {
     async fn vector_dimension(&self) -> Result<u32, McpError> {
         Ok(384)
     }
+    async fn semantic_search(
+        &self,
+        embedding: &Embedding,
+        kind: Option<&EntityType>,
+        limit: Option<u32>,
+    ) -> Result<Vec<SemanticQueryResult>, McpError> {
+        if !self.available {
+            return Err(McpError::Transport(
+                "SECRET provider response body".to_owned(),
+            ));
+        }
+        assert_eq!(embedding.values(), &[0.12345; 384]);
+        assert_eq!(kind.map(EntityType::as_str), Some("Projekt"));
+        assert_eq!(limit, Some(7));
+        Ok(vec![SemanticQueryResult {
+            entity_name: name("Alpha"),
+            entity_type: entity_type("Projekt"),
+            score: 0.9,
+        }])
+    }
+    async fn hybrid_search(
+        &self,
+        embedding: &Embedding,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<HybridQueryResult>, McpError> {
+        if !self.available {
+            return Err(McpError::Transport(
+                "SECRET provider response body".to_owned(),
+            ));
+        }
+        assert_eq!(embedding.values(), &[0.12345; 384]);
+        assert_eq!(query, "find a project");
+        assert_eq!(limit, Some(7));
+        Ok(vec![HybridQueryResult {
+            entity_name: name("Alpha"),
+            entity_type: entity_type("Projekt"),
+            score: 0.8,
+            text_score: 0.7,
+            vec_score: 0.9,
+        }])
+    }
+}
+
+struct FakeEmbedding;
+
+#[async_trait]
+impl EmbeddingProvider for FakeEmbedding {
+    async fn embed(&self, inputs: &[String]) -> Result<Vec<Embedding>, EmbeddingError> {
+        assert_eq!(inputs, &["find a project"]);
+        Ok(vec![
+            Embedding::new(
+                vec![0.12345; 384],
+                Dimension::parse(384).expect("dimension"),
+            )
+            .expect("embedding"),
+        ])
+    }
 }
 
 struct FakeQuery {
@@ -228,12 +288,21 @@ fn app(state: Arc<FakeState>, available: bool) -> axum::Router {
 
 fn app_with_auth(state: Arc<FakeState>) -> axum::Router {
     router_with_auth(
-        state,
+        Arc::clone(&state),
         Arc::new(FakeMcp { available: true }),
         Arc::new(FakeQuery { available: true }),
         Duration::seconds(60),
         BearerAuth::enabled(SecretString::from("indexer-test-token")),
     )
+    .merge(second_brain_indexer::indexer_mcp::indexer_mcp_router(
+        state,
+        Arc::new(FakeMcp { available: true }),
+        Arc::new(FakeQuery { available: true }),
+        Arc::new(FakeEmbedding),
+        Duration::seconds(60),
+        Shutdown::new(),
+        BearerAuth::enabled(SecretString::from("indexer-test-token")),
+    ))
 }
 
 fn app_with_shutdown(state: Arc<FakeState>, shutdown: Shutdown) -> axum::Router {
@@ -488,4 +557,495 @@ async fn shutdown_refuses_new_posts_but_keeps_read_routes_available() {
     )
     .await;
     assert_eq!(get_status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn indexer_mcp_initializes_without_a_session() {
+    let (status, body, _) = response(
+        app_with_auth(Arc::new(FakeState::queued())),
+        Request::post("/indexer/mcp")
+            .header(header::AUTHORIZATION, "Bearer indexer-test-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json, text/event-stream")
+            .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"contract-test","version":"1"}}}"#))
+            .expect("request builds"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let result: serde_json::Value = serde_json::from_str(&body).expect("JSON response");
+    assert_eq!(result["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(
+        result["result"]["capabilities"]["tools"],
+        serde_json::json!({"listChanged":false})
+    );
+}
+
+fn mcp_request(value: serde_json::Value) -> Request<Body> {
+    Request::post("/indexer/mcp")
+        .header(header::AUTHORIZATION, "Bearer indexer-test-token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .body(Body::from(value.to_string()))
+        .expect("request builds")
+}
+
+fn tool_request(tool: &str, arguments: serde_json::Value) -> Request<Body> {
+    mcp_request(
+        serde_json::json!({"jsonrpc":"2.0","id":"query-1","method":"tools/call","params":{"name":tool,"arguments":arguments}}),
+    )
+}
+
+fn tool_body(body: &str) -> serde_json::Value {
+    let envelope: serde_json::Value = serde_json::from_str(body).expect("JSON-RPC response");
+    assert_eq!(envelope["id"], "query-1");
+    serde_json::from_str(
+        envelope["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text content"),
+    )
+    .expect("tool JSON")
+}
+
+#[tokio::test]
+async fn indexer_mcp_lists_only_the_five_typed_tools() {
+    let (status, body, _) = response(
+        app_with_auth(Arc::new(FakeState::queued())),
+        mcp_request(serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let envelope: serde_json::Value = serde_json::from_str(&body).expect("JSON-RPC response");
+    let tools = envelope["result"]["tools"].as_array().expect("tools");
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name"))
+            .collect::<Vec<_>>(),
+        vec![
+            "indexer_semantic_search",
+            "indexer_hybrid_search",
+            "indexer_reindex_entity",
+            "indexer_reindex_all",
+            "indexer_run_status"
+        ]
+    );
+    for tool in tools {
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    }
+    assert_eq!(
+        tools[0]["inputSchema"]["required"],
+        serde_json::json!(["query"])
+    );
+}
+
+#[tokio::test]
+async fn indexer_mcp_authenticates_every_request() {
+    for token in [None, Some("Bearer wrong-token")] {
+        let mut request = tool_request("indexer_reindex_all", serde_json::json!({}));
+        request.headers_mut().remove(header::AUTHORIZATION);
+        if let Some(token) = token {
+            request
+                .headers_mut()
+                .insert(header::AUTHORIZATION, token.parse().expect("header"));
+        }
+        let state = Arc::new(FakeState::queued());
+        let (status, body, _) = response(app_with_auth(state.clone()), request).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(!body.contains("indexer-test-token"));
+        assert!(state.requests.lock().expect("requests").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn indexer_mcp_embeds_searches_server_side_and_returns_normalized_rows() {
+    for (tool, expected) in [
+        (
+            "indexer_semantic_search",
+            serde_json::json!({"results":[{"entityName":"Alpha","entityType":"Projekt","score":0.9}]}),
+        ),
+        (
+            "indexer_hybrid_search",
+            serde_json::json!({"results":[{"entityName":"Alpha","entityType":"Projekt","score":0.8,"textScore":0.7,"vecScore":0.9}]}),
+        ),
+    ] {
+        let (status, body, _) = response(
+            app_with_auth(Arc::new(FakeState::queued())),
+            tool_request(
+                tool,
+                serde_json::json!({"query":"find a project","limit":7,"entityType":"Projekt"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tool_body(&body), expected);
+        for forbidden in ["embedding", "0.12345", "SECRET", "observations"] {
+            assert!(!body.contains(forbidden));
+        }
+    }
+}
+
+#[tokio::test]
+async fn indexer_mcp_invalid_arguments_are_tool_errors_without_queue_writes() {
+    let state = Arc::new(FakeState::queued());
+    for (tool, arguments) in [
+        ("indexer_semantic_search", serde_json::json!({"query":" "})),
+        (
+            "indexer_semantic_search",
+            serde_json::json!({"query":"find a project","limit":0}),
+        ),
+        (
+            "indexer_hybrid_search",
+            serde_json::json!({"query":"find a project","limit":101}),
+        ),
+        (
+            "indexer_semantic_search",
+            serde_json::json!({"query":"find a project","embedding":[1,2]}),
+        ),
+        (
+            "indexer_reindex_entity",
+            serde_json::json!({"entityName":""}),
+        ),
+        ("indexer_reindex_all", serde_json::json!({"force":true})),
+    ] {
+        let (status, body, _) =
+            response(app_with_auth(state.clone()), tool_request(tool, arguments)).await;
+        assert_eq!(status, StatusCode::OK);
+        let envelope: serde_json::Value = serde_json::from_str(&body).expect("JSON response");
+        assert_eq!(envelope["result"]["isError"], true, "{body}");
+        assert_eq!(tool_body(&body)["error"]["code"], "invalid_arguments");
+    }
+    assert!(state.requests.lock().expect("requests").is_empty());
+}
+
+#[tokio::test]
+async fn indexer_mcp_reindex_and_status_reuse_existing_ports() {
+    let state = Arc::new(FakeState::queued());
+    for (tool, args, selector) in [
+        (
+            "indexer_reindex_entity",
+            serde_json::json!({"entityName":"Alpha"}),
+            Selector::Entity(name("Alpha")),
+        ),
+        ("indexer_reindex_all", serde_json::json!({}), Selector::Full),
+    ] {
+        let (status, body, _) =
+            response(app_with_auth(state.clone()), tool_request(tool, args)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tool_body(&body)["status"], "queued");
+        assert_eq!(
+            state
+                .requests
+                .lock()
+                .expect("requests")
+                .last()
+                .expect("request")
+                .selector,
+            selector
+        );
+    }
+    let (_, body, _) = response(
+        app_with_auth(state),
+        tool_request("indexer_run_status", serde_json::json!({"runId":"known"})),
+    )
+    .await;
+    assert_eq!(tool_body(&body)["entitiesIndexed"], 1);
+    assert_eq!(tool_body(&body)["status"], "succeeded");
+}
+
+#[tokio::test]
+async fn indexer_mcp_handles_notifications_and_protocol_errors() {
+    let app = app_with_auth(Arc::new(FakeState::queued()));
+    let (status, body, _) = response(
+        app.clone(),
+        mcp_request(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(body.is_empty());
+    let (_, body, _) = response(
+        app.clone(),
+        mcp_request(serde_json::json!({"jsonrpc":"2.0","id":3,"method":"unknown"})),
+    )
+    .await;
+    let envelope: serde_json::Value = serde_json::from_str(&body).expect("JSON response");
+    assert_eq!(envelope["error"]["code"], -32601);
+    let (status, _, _) = response(
+        app,
+        Request::get("/indexer/mcp")
+            .header(header::AUTHORIZATION, "Bearer indexer-test-token")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+fn mcp_app<S: StateRepository + 'static>(
+    state: Arc<S>,
+    available: bool,
+    shutdown: Shutdown,
+    embedding: Arc<dyn EmbeddingProvider>,
+) -> axum::Router {
+    second_brain_indexer::indexer_mcp::indexer_mcp_router(
+        state,
+        Arc::new(FakeMcp { available }),
+        Arc::new(FakeQuery { available: true }),
+        embedding,
+        Duration::seconds(60),
+        shutdown,
+        BearerAuth::enabled(SecretString::from("indexer-test-token")),
+    )
+}
+
+#[tokio::test]
+async fn indexer_mcp_coalesces_real_durable_active_queue() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let state = Arc::new(
+        second_brain_indexer::adapters::sqlite::SqliteStateRepository::connect(
+            &directory.path().join("state.db"),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("repository"),
+    );
+    let app = mcp_app(
+        state.clone(),
+        true,
+        Shutdown::new(),
+        Arc::new(FakeEmbedding),
+    );
+    let (_, first, _) = response(
+        app.clone(),
+        tool_request("indexer_reindex_all", serde_json::json!({})),
+    )
+    .await;
+    let first = tool_body(&first);
+    assert_eq!(first["coalesced"], false);
+    let (_, repeated, _) = response(
+        app.clone(),
+        tool_request("indexer_reindex_all", serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(tool_body(&repeated)["coalesced"], true);
+    assert_eq!(tool_body(&repeated)["runId"], first["runId"]);
+    assert!(
+        state
+            .claim_next("test-worker", OffsetDateTime::now_utc())
+            .await
+            .expect("claim")
+            .is_some()
+    );
+    let (_, queued, _) = response(
+        app.clone(),
+        tool_request(
+            "indexer_reindex_entity",
+            serde_json::json!({"entityName":"Alpha"}),
+        ),
+    )
+    .await;
+    let queued = tool_body(&queued);
+    assert_eq!(queued["coalesced"], false);
+    assert_ne!(queued["runId"], first["runId"]);
+    let (_, repeated, _) = response(
+        app.clone(),
+        tool_request(
+            "indexer_reindex_entity",
+            serde_json::json!({"entityName":"Alpha"}),
+        ),
+    )
+    .await;
+    assert_eq!(tool_body(&repeated)["coalesced"], true);
+    assert_eq!(tool_body(&repeated)["runId"], queued["runId"]);
+    let (_, conflict, _) = response(
+        app,
+        tool_request("indexer_reindex_all", serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(tool_body(&conflict)["error"]["code"], "run_in_progress");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run")
+        .fetch_one(state.pool())
+        .await
+        .expect("count runs");
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn indexer_mcp_shutdown_refuses_new_work_but_allows_run_status() {
+    let shutdown = Shutdown::new();
+    shutdown.begin();
+    let state = Arc::new(FakeState::queued());
+    let app = mcp_app(state.clone(), true, shutdown, Arc::new(FakeEmbedding));
+    for (tool, args) in [
+        ("indexer_reindex_all", serde_json::json!({})),
+        (
+            "indexer_reindex_entity",
+            serde_json::json!({"entityName":"Alpha"}),
+        ),
+        (
+            "indexer_semantic_search",
+            serde_json::json!({"query":"find a project","entityType":"Projekt","limit":7}),
+        ),
+    ] {
+        let (_, body, _) = response(app.clone(), tool_request(tool, args)).await;
+        assert_eq!(tool_body(&body)["error"]["code"], "shutting_down");
+    }
+    let (_, body, _) = response(
+        app,
+        tool_request("indexer_run_status", serde_json::json!({"runId":"known"})),
+    )
+    .await;
+    assert_eq!(tool_body(&body)["status"], "succeeded");
+    assert!(state.requests.lock().expect("requests").is_empty());
+}
+
+struct BrokenEmbedding;
+
+#[async_trait]
+impl EmbeddingProvider for BrokenEmbedding {
+    async fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, EmbeddingError> {
+        Err(EmbeddingError::Unauthorized)
+    }
+}
+
+#[tokio::test]
+async fn indexer_mcp_redacts_embedding_and_backend_errors() {
+    let providers: [(bool, Arc<dyn EmbeddingProvider>); 2] = [
+        (false, Arc::new(FakeEmbedding)),
+        (true, Arc::new(BrokenEmbedding)),
+    ];
+    for (available, provider) in providers {
+        let app = mcp_app(
+            Arc::new(FakeState::queued()),
+            available,
+            Shutdown::new(),
+            provider,
+        );
+        for tool in ["indexer_semantic_search", "indexer_hybrid_search"] {
+            let (_, body, _) = response(
+                app.clone(),
+                tool_request(
+                    tool,
+                    serde_json::json!({"query":"find a project","entityType":"Projekt","limit":7}),
+                ),
+            )
+            .await;
+            assert_eq!(
+                tool_body(&body),
+                serde_json::json!({"error":{"code":"unavailable","message":"service is unavailable"}})
+            );
+            for forbidden in [
+                "SECRET",
+                "Unauthorized",
+                "find a project",
+                "indexer-test-token",
+            ] {
+                assert!(!body.contains(forbidden));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn indexer_mcp_transport_rejects_untrusted_origins_and_invalid_envelopes() {
+    let app = app_with_auth(Arc::new(FakeState::queued()));
+    let mut request =
+        mcp_request(serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}));
+    request.headers_mut().insert(
+        header::ORIGIN,
+        "https://untrusted.example".parse().expect("origin"),
+    );
+    assert_eq!(
+        response(app.clone(), request).await.0,
+        StatusCode::FORBIDDEN
+    );
+    for value in [
+        serde_json::json!([]),
+        serde_json::json!({"jsonrpc":"1.0","id":1,"method":"tools/list"}),
+        serde_json::json!({"jsonrpc":"2.0","id":null,"method":"tools/list"}),
+    ] {
+        let (_, body, _) = response(app.clone(), mcp_request(value)).await;
+        let envelope: serde_json::Value = serde_json::from_str(&body).expect("JSON response");
+        assert_eq!(envelope["error"]["code"], -32600);
+    }
+    let (_, body, _) = response(
+        app,
+        mcp_request(serde_json::json!([
+            {"jsonrpc":"2.0","method":"notifications/initialized"},
+            {"jsonrpc":"2.0","id":4,"method":"tools/list"}
+        ])),
+    )
+    .await;
+    let envelope: serde_json::Value = serde_json::from_str(&body).expect("batch response");
+    assert_eq!(envelope.as_array().expect("batch").len(), 1);
+    assert_eq!(envelope[0]["id"], 4);
+}
+
+#[tokio::test]
+async fn indexer_mcp_checks_origin_on_get_and_rejects_client_response_envelopes() {
+    let app = mcp_app(
+        Arc::new(FakeState::queued()),
+        true,
+        Shutdown::new(),
+        Arc::new(FakeEmbedding),
+    );
+    let (status, _, _) = response(
+        app.clone(),
+        Request::get("/indexer/mcp")
+            .header(header::AUTHORIZATION, "Bearer indexer-test-token")
+            .header(header::ORIGIN, "https://untrusted.example")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body, _) = response(
+        app,
+        mcp_request(serde_json::json!({"jsonrpc":"2.0","id":5,"result":{}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let envelope: serde_json::Value = serde_json::from_str(&body).expect("JSON response");
+    assert_eq!(envelope["error"]["code"], -32600);
+}
+
+#[tokio::test]
+async fn indexer_mcp_missing_runs_and_entities_report_bounded_tool_errors() {
+    let state = Arc::new(FakeState::queued());
+    for (tool, args, code) in [
+        (
+            "indexer_run_status",
+            serde_json::json!({"runId":"unknown"}),
+            "run_not_found",
+        ),
+        (
+            "indexer_reindex_entity",
+            serde_json::json!({"entityName":"Missing"}),
+            "target_not_found",
+        ),
+    ] {
+        let (_, body, _) = response(
+            mcp_app(
+                state.clone(),
+                true,
+                Shutdown::new(),
+                Arc::new(FakeEmbedding),
+            ),
+            tool_request(tool, args),
+        )
+        .await;
+        assert_eq!(tool_body(&body)["error"]["code"], code);
+    }
+    assert!(state.requests.lock().expect("requests").is_empty());
+}
+
+#[tokio::test]
+async fn indexer_mcp_hybrid_filter_applies_to_normalized_top_results() {
+    let (_, body, _) = response(
+        app_with_auth(Arc::new(FakeState::queued())),
+        tool_request(
+            "indexer_hybrid_search",
+            serde_json::json!({"query":"find a project","limit":7,"entityType":"Osoba"}),
+        ),
+    )
+    .await;
+    assert_eq!(tool_body(&body), serde_json::json!({"results":[]}));
 }

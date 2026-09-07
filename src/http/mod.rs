@@ -135,12 +135,12 @@ impl BearerAuth {
     }
 }
 
-struct AppState<S, M, Q> {
-    state: Arc<S>,
-    mcp: Arc<M>,
-    query: Arc<Q>,
-    idempotency_ttl: Duration,
-    shutdown: Option<Shutdown>,
+pub(crate) struct AppState<S, M, Q> {
+    pub(crate) state: Arc<S>,
+    pub(crate) mcp: Arc<M>,
+    pub(crate) query: Arc<Q>,
+    pub(crate) idempotency_ttl: Duration,
+    pub(crate) shutdown: Option<Shutdown>,
 }
 
 impl<S, M, Q> Clone for AppState<S, M, Q> {
@@ -263,7 +263,11 @@ where
         .with_state(app_state)
 }
 
-async fn require_bearer(State(auth): State<BearerAuth>, request: Request, next: Next) -> Response {
+pub(crate) async fn require_bearer(
+    State(auth): State<BearerAuth>,
+    request: Request,
+    next: Next,
+) -> Response {
     if auth.authorizes(request.headers()) {
         next.run(request).await
     } else {
@@ -402,6 +406,26 @@ where
     M: McpMemoryPort,
     Q: HttpQueryPort,
 {
+    let selector = match raw_selector.into_domain() {
+        Ok(selector) => selector,
+        Err(message) => return error(StatusCode::BAD_REQUEST, "invalid_selector", message),
+    };
+    enqueue_selector(app, headers, selector, trigger).await
+}
+
+/// Shared durable enqueue path for REST and MCP delivery. Target validation,
+/// shutdown refusal, idempotency and coalescing stay in one place.
+pub(crate) async fn enqueue_selector<S, M, Q>(
+    app: AppState<S, M, Q>,
+    headers: HeaderMap,
+    selector: Selector,
+    trigger: RunTrigger,
+) -> Response
+where
+    S: StateRepository,
+    M: McpMemoryPort,
+    Q: HttpQueryPort,
+{
     if app
         .shutdown
         .as_ref()
@@ -413,10 +437,6 @@ where
             "service is shutting down",
         );
     }
-    let selector = match raw_selector.into_domain() {
-        Ok(selector) => selector,
-        Err(message) => return error(StatusCode::BAD_REQUEST, "invalid_selector", message),
-    };
     match target_exists(&*app.mcp, &selector).await {
         Ok(true) => {}
         Ok(false) => {
