@@ -260,6 +260,68 @@ Changing a provider, model, or dimension changes the embedding space. Old and ne
 4. Replace `[embedding]` with the native Ollama `bge-m3` example in `config.toml`, remove `OPENAI_API_KEY` from the service secret file, then restart the service. Confirm the journal records matching configured and MCP dimensions before continuing.
 5. Trigger exactly one full reindex and poll its run to a final state. The full scan is required because every entity needs a new BGE-M3 vector.
 
+### Run the migration gate
+
+`vector_store_stats` is read-only: it does not create, update, or delete vectors. Use the real mcp-memory endpoint in your configuration, but never paste its bearer token into this document or a command history. The `initialize` response supplies `MCP-Session-Id`; retain it for the notification and tool call.
+
+In **Bash**, prompt for the token and perform the authenticated Streamable HTTP initialization:
+
+```bash
+read -r -s -p "mcp-memory bearer token: " MCP_MEMORY_TOKEN; echo
+MCP_MEMORY_URL='https://mcp-memory.example.com/mcp'
+MCP_HEADER_FILE="$(mktemp)"
+curl --silent --show-error --fail-with-body --dump-header "$MCP_HEADER_FILE" \
+  -H "Authorization: Bearer $MCP_MEMORY_TOKEN" \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":"migration-initialize","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"second-brain-indexer-migration-check","version":"1"}}}' \
+  "$MCP_MEMORY_URL"
+MCP_SESSION_ID="$(awk 'tolower($1) == "mcp-session-id:" {sub(/\r$/, "", $2); print $2; exit}' "$MCP_HEADER_FILE")"
+rm -f "$MCP_HEADER_FILE"
+test -n "$MCP_SESSION_ID"
+```
+
+<details>
+<summary>Using Fish instead of Bash?</summary>
+
+```fish
+read -s -P "mcp-memory bearer token: " MCP_MEMORY_TOKEN; echo
+set MCP_MEMORY_URL 'https://mcp-memory.example.com/mcp'
+set MCP_HEADER_FILE (mktemp)
+curl --silent --show-error --fail-with-body --dump-header "$MCP_HEADER_FILE" \
+  -H "Authorization: Bearer $MCP_MEMORY_TOKEN" \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":"migration-initialize","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"second-brain-indexer-migration-check","version":"1"}}}' \
+  "$MCP_MEMORY_URL"
+set MCP_SESSION_ID (awk 'tolower($1) == "mcp-session-id:" {sub(/\r$/, "", $2); print $2; exit}' "$MCP_HEADER_FILE")
+rm -f "$MCP_HEADER_FILE"
+test -n "$MCP_SESSION_ID"; or exit 1
+```
+
+</details>
+
+Then run these commands, which are identical in Bash and Fish. They complete MCP initialization and call the non-destructive `vector_store_stats` tool:
+
+```text
+curl --silent --show-error --fail-with-body \
+  -H "Authorization: Bearer $MCP_MEMORY_TOKEN" \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -H "MCP-Session-Id: $MCP_SESSION_ID" \
+  --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  "$MCP_MEMORY_URL"
+curl --silent --show-error --fail-with-body \
+  -H "Authorization: Bearer $MCP_MEMORY_TOKEN" \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -H "MCP-Session-Id: $MCP_SESSION_ID" \
+  --data '{"jsonrpc":"2.0","id":"migration-vector-stats","method":"tools/call","params":{"name":"vector_store_stats","arguments":{}}}' \
+  "$MCP_MEMORY_URL"
+```
+
+Accept the gate only when the final JSON-RPC response has `"dims":1024` and `"embeddingCount":0`: `{"jsonrpc":"2.0","id":"migration-vector-stats","result":{"dims":1024,"embeddingCount":0}}` (additional result fields are allowed). An empty/rebuilt index is expected before the full reindex; any other dimension or a non-empty old index means stop and correct the rebuild.
+
 The commands below are identical in Bash and Fish after `INDEXER_API_TOKEN` is set with the shell-specific secure prompt shown above:
 
 ```text
