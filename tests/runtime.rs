@@ -13,12 +13,13 @@ use axum::{
 use second_brain_indexer::{
     application::execute_run::ExecutionReport,
     config::{EmbeddingConfig, EmbeddingEngine, build_embedding_provider},
-    domain::model::{ClaimedRun, Dimension, IndexedEntityState, Lease, RunId},
+    domain::model::{ClaimedRun, Dimension, Embedding, IndexedEntityState, Lease, RunId},
     ports::{
-        CompletedWork, EnqueueOutcome, EnqueueRequest, FailedWork, RunCompletion, StageWork,
-        StateError, StateRepository,
+        CompletedWork, EmbeddingError, EmbeddingProvider, EnqueueOutcome, EnqueueRequest,
+        FailedWork, RunCompletion, StageWork, StateError, StateRepository,
     },
     runtime::{
+        bind_after_embedding_probe,
         bootstrap::Bootstrap,
         lock::ProcessLock,
         logging::record_execution_report,
@@ -166,6 +167,42 @@ impl RunProcessor for FakeProcessor {
         *self.0.lock().expect("test mutex") += 1;
         Ok(())
     }
+}
+
+struct WrongDimensionProvider;
+
+#[async_trait]
+impl EmbeddingProvider for WrongDimensionProvider {
+    async fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, EmbeddingError> {
+        Embedding::new(
+            vec![0.0; 3],
+            Dimension::parse(3).expect("test dimension is valid"),
+        )
+        .map(|embedding| vec![embedding])
+        .map_err(|_| EmbeddingError::InvalidResponse)
+    }
+}
+
+#[tokio::test]
+async fn mismatched_startup_probe_leaves_the_listener_address_unbound() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener binds");
+    let address = listener.local_addr().expect("test listener has address");
+    drop(listener);
+
+    let error = bind_after_embedding_probe(
+        &WrongDimensionProvider,
+        Dimension::parse(2).expect("test dimension is valid"),
+        address,
+    )
+    .await
+    .expect_err("mismatched provider dimensions stop startup");
+
+    assert!(matches!(error, EmbeddingError::InvalidResponse));
+    TcpListener::bind(address)
+        .await
+        .expect("startup rejection leaves the listener address unbound");
 }
 
 #[tokio::test]

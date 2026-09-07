@@ -5,13 +5,14 @@ use second_brain_indexer::{
     adapters::{mcp::StreamableHttpMcpAdapter, sqlite::SqliteStateRepository},
     application::execute_run::RunExecutor,
     config::{AppConfig, EnvironmentSecretLookup, build_embedding_provider, parse_toml},
-    domain::model::{ClaimedRun, Dimension, RunId},
+    domain::model::{ClaimedRun, RunId},
     http::{
         BearerAuth, GenerationView, HttpDependencyError, HttpQueryPort, PollingView,
         RunSummaryView, RunView, StatsView, StatusView, router_with_shutdown_and_auth,
     },
     ports::{EmbeddingError, EmbeddingProvider, McpMemoryPort},
     runtime::{
+        bind_after_embedding_probe,
         bootstrap::Bootstrap,
         logging::record_execution_report,
         metrics::Metrics,
@@ -22,12 +23,10 @@ use second_brain_indexer::{
 };
 use sqlx::Row;
 use time::OffsetDateTime;
-use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const IDLE_WORKER_DELAY: Duration = Duration::from_millis(100);
-const STARTUP_EMBEDDING_PROBE: &str = "second-brain-indexer startup embedding probe";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -85,7 +84,6 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         "MCP session established and vector-store dimension verified"
     );
     let embedding = build_embedding_provider(&config.embedding)?;
-    probe_embedding(&*embedding, config.embedding.dimensions).await?;
     let shutdown = Shutdown::new();
     let metrics = Arc::new(Metrics::default());
     let query = Arc::new(RuntimeQuery::new(
@@ -108,7 +106,8 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
             .map_or_else(BearerAuth::disabled, BearerAuth::enabled),
     );
     let address = config.server.bind;
-    let listener = TcpListener::bind(address).await?;
+    let listener =
+        bind_after_embedding_probe(&*embedding, config.embedding.dimensions, address).await?;
     let processor = Arc::new(ProductionProcessor {
         state: Arc::clone(&state),
         mcp,
@@ -163,19 +162,6 @@ async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         task.abort();
     }
     Ok(())
-}
-
-async fn probe_embedding(
-    provider: &dyn EmbeddingProvider,
-    expected: Dimension,
-) -> Result<(), EmbeddingError> {
-    let embeddings = provider
-        .embed(&[STARTUP_EMBEDDING_PROBE.to_owned()])
-        .await?;
-    match embeddings.as_slice() {
-        [embedding] if embedding.values().len() == expected.get() as usize => Ok(()),
-        _ => Err(EmbeddingError::InvalidResponse),
-    }
 }
 
 fn initialise_logging() {
@@ -423,29 +409,14 @@ fn run_view(row: sqlx::sqlite::SqliteRow) -> Result<RunView, HttpDependencyError
 mod tests {
     use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
-    use async_trait::async_trait;
     use second_brain_indexer::{
         config::{EmbeddingConfig, EmbeddingEngine},
-        domain::model::{Dimension, Embedding},
-        ports::{EmbeddingError, EmbeddingProvider},
+        domain::model::Dimension,
     };
     use secrecy::SecretString;
     use url::Url;
 
-    use super::{
-        LogFormat, build_embedding_provider, log_format, probe_embedding, startup_ready_message,
-    };
-
-    struct FixedDimensionProvider(Dimension);
-
-    #[async_trait]
-    impl EmbeddingProvider for FixedDimensionProvider {
-        async fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, EmbeddingError> {
-            Embedding::new(vec![0.0; self.0.get() as usize], self.0)
-                .map(|embedding| vec![embedding])
-                .map_err(|_| EmbeddingError::InvalidResponse)
-        }
-    }
+    use super::{LogFormat, build_embedding_provider, log_format, startup_ready_message};
 
     #[test]
     fn startup_message_reports_listener_dimension_and_polling_state() {
@@ -492,17 +463,5 @@ mod tests {
         };
 
         assert!(build_embedding_provider(&config).is_ok());
-    }
-
-    #[tokio::test]
-    async fn startup_probe_rejects_a_provider_dimension_that_does_not_match_configuration() {
-        let expected = Dimension::parse(2).expect("test dimension is valid");
-        let provider =
-            FixedDimensionProvider(Dimension::parse(3).expect("test dimension is valid"));
-
-        assert!(matches!(
-            probe_embedding(&provider, expected).await,
-            Err(EmbeddingError::InvalidResponse)
-        ));
     }
 }

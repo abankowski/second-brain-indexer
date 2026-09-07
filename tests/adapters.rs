@@ -375,6 +375,62 @@ async fn ollama_adapter_rejects_a_response_with_the_wrong_embedding_cardinality(
 }
 
 #[tokio::test]
+async fn ollama_adapter_classifies_http_failures_without_leaking_provider_bodies() {
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::BAD_REQUEST,
+    ] {
+        let base_url = serve(Router::new().route(
+            "/api/embed",
+            post(move || async move {
+                Response::builder()
+                    .status(status)
+                    .body(Body::from("provider-body-not-for-output"))
+                    .expect("test response is valid")
+            }),
+        ))
+        .await;
+        let adapter = OllamaEmbeddingAdapter::new(&ollama_embedding_config(base_url))
+            .expect("adapter builds");
+
+        let error = adapter
+            .embed(&["non-secret test input".to_owned()])
+            .await
+            .expect_err("non-success HTTP response fails");
+
+        match status {
+            StatusCode::UNAUTHORIZED => assert!(matches!(error, EmbeddingError::Unauthorized)),
+            StatusCode::TOO_MANY_REQUESTS => assert!(matches!(error, EmbeddingError::RateLimited)),
+            StatusCode::INTERNAL_SERVER_ERROR => assert!(matches!(error, EmbeddingError::Server)),
+            StatusCode::BAD_REQUEST => assert!(matches!(error, EmbeddingError::InvalidResponse)),
+            _ => unreachable!("test table only contains bounded error classes"),
+        }
+        assert!(!error.to_string().contains("provider-body-not-for-output"));
+        assert!(!error.to_string().contains("non-secret test input"));
+    }
+}
+
+#[tokio::test]
+async fn ollama_adapter_rejects_a_vector_with_the_wrong_dimension() {
+    let base_url = serve(Router::new().route(
+        "/api/embed",
+        post(|| async { Json(json!({"embeddings":[[1.0]]})) }),
+    ))
+    .await;
+    let adapter =
+        OllamaEmbeddingAdapter::new(&ollama_embedding_config(base_url)).expect("adapter builds");
+
+    let error = adapter
+        .embed(&["input".to_owned()])
+        .await
+        .expect_err("a wrong-dimension vector is invalid");
+
+    assert!(matches!(error, EmbeddingError::InvalidResponse));
+}
+
+#[tokio::test]
 async fn openai_adapter_rejects_auth_rate_limit_and_invalid_cardinality_without_leaking_secret() {
     async fn unauthorized() -> Response<Body> {
         Response::builder()
