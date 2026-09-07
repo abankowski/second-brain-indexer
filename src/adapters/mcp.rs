@@ -11,10 +11,13 @@ use url::Url;
 use crate::{
     config::McpConfig,
     domain::model::{
-        DeletionProof, EntityName, EntityType, GraphEntity, GraphRelation, GraphSnapshot,
-        IncompleteSnapshotReason,
+        DeletionProof, Embedding, EntityName, EntityType, GraphEntity, GraphRelation,
+        GraphSnapshot, IncompleteSnapshotReason,
     },
-    ports::{BatchWriteFailure, BatchWriteResult, McpError, McpMemoryPort, VectorWrite},
+    ports::{
+        BatchWriteFailure, BatchWriteResult, HybridQueryResult, McpError, McpMemoryPort,
+        SemanticQueryResult, VectorWrite,
+    },
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -235,6 +238,79 @@ impl McpMemoryPort for StreamableHttpMcpAdapter {
             .then_some(payload.dims)
             .ok_or(McpError::InvalidResponse)
     }
+
+    async fn semantic_search(
+        &self,
+        embedding: &Embedding,
+        entity_type: Option<&EntityType>,
+        limit: Option<u32>,
+    ) -> Result<Vec<SemanticQueryResult>, McpError> {
+        let payload: SemanticQueryPayload = deserialize_tool_payload(
+            self.tool_text(
+                "vector_search_entities",
+                semantic_query_arguments(embedding, entity_type, limit)?,
+            )
+            .await?,
+        )?;
+        payload.into_domain()
+    }
+
+    async fn hybrid_search(
+        &self,
+        embedding: &Embedding,
+        query_text: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<HybridQueryResult>, McpError> {
+        let payload: HybridQueryPayload = deserialize_tool_payload(
+            self.tool_text(
+                "hybrid_search",
+                hybrid_query_arguments(embedding, query_text, limit)?,
+            )
+            .await?,
+        )?;
+        payload.into_domain()
+    }
+}
+
+fn checked_limit(limit: Option<u32>) -> Result<Option<u32>, McpError> {
+    match limit {
+        Some(value @ 1..=100) => Ok(Some(value)),
+        Some(_) => Err(McpError::InvalidResponse),
+        None => Ok(None),
+    }
+}
+
+fn semantic_query_arguments(
+    embedding: &Embedding,
+    entity_type: Option<&EntityType>,
+    limit: Option<u32>,
+) -> Result<Value, McpError> {
+    let mut arguments = serde_json::Map::new();
+    arguments.insert("embedding".to_owned(), json!(embedding.values()));
+    if let Some(entity_type) = entity_type {
+        arguments.insert("entityType".to_owned(), json!(entity_type.as_str()));
+    }
+    if let Some(limit) = checked_limit(limit)? {
+        arguments.insert("topK".to_owned(), json!(limit));
+    }
+    Ok(Value::Object(arguments))
+}
+
+fn hybrid_query_arguments(
+    embedding: &Embedding,
+    query_text: &str,
+    limit: Option<u32>,
+) -> Result<Value, McpError> {
+    if query_text.trim().is_empty() {
+        return Err(McpError::InvalidResponse);
+    }
+    let mut arguments = serde_json::Map::new();
+    arguments.insert("queryEmbedding".to_owned(), json!(embedding.values()));
+    arguments.insert("queryText".to_owned(), json!(query_text));
+    if let Some(limit) = checked_limit(limit)? {
+        arguments.insert("topK".to_owned(), json!(limit));
+    }
+    Ok(Value::Object(arguments))
 }
 
 async fn parse_mcp_response(
@@ -440,6 +516,92 @@ struct DeletePayload {}
 #[derive(Deserialize)]
 struct VectorStoreStatsPayload {
     dims: u32,
+}
+
+#[derive(Deserialize)]
+struct SemanticQueryPayload {
+    results: Vec<SemanticQueryResultDto>,
+    count: u32,
+}
+
+impl SemanticQueryPayload {
+    fn into_domain(self) -> Result<Vec<SemanticQueryResult>, McpError> {
+        if self.count != u32::try_from(self.results.len()).map_err(|_| McpError::InvalidResponse)? {
+            return Err(McpError::InvalidResponse);
+        }
+        self.results
+            .into_iter()
+            .map(SemanticQueryResultDto::into_domain)
+            .collect()
+    }
+}
+
+#[derive(Deserialize)]
+struct SemanticQueryResultDto {
+    name: String,
+    #[serde(rename = "entityType")]
+    entity_type: String,
+    score: f64,
+}
+
+impl SemanticQueryResultDto {
+    fn into_domain(self) -> Result<SemanticQueryResult, McpError> {
+        if !self.score.is_finite() {
+            return Err(McpError::InvalidResponse);
+        }
+        Ok(SemanticQueryResult {
+            entity_name: EntityName::parse(self.name).map_err(|_| McpError::InvalidResponse)?,
+            entity_type: EntityType::parse(self.entity_type)
+                .map_err(|_| McpError::InvalidResponse)?,
+            score: self.score,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct HybridQueryPayload {
+    results: Vec<HybridQueryResultDto>,
+    count: u32,
+}
+
+impl HybridQueryPayload {
+    fn into_domain(self) -> Result<Vec<HybridQueryResult>, McpError> {
+        if self.count != u32::try_from(self.results.len()).map_err(|_| McpError::InvalidResponse)? {
+            return Err(McpError::InvalidResponse);
+        }
+        self.results
+            .into_iter()
+            .map(HybridQueryResultDto::into_domain)
+            .collect()
+    }
+}
+
+#[derive(Deserialize)]
+struct HybridQueryResultDto {
+    name: String,
+    #[serde(rename = "entityType")]
+    entity_type: String,
+    score: f64,
+    #[serde(rename = "textScore")]
+    text_score: f64,
+    #[serde(rename = "vecScore")]
+    vec_score: f64,
+}
+
+impl HybridQueryResultDto {
+    fn into_domain(self) -> Result<HybridQueryResult, McpError> {
+        if !self.score.is_finite() || !self.text_score.is_finite() || !self.vec_score.is_finite() {
+            return Err(McpError::InvalidResponse);
+        }
+        Ok(HybridQueryResult {
+            entity_name: EntityName::parse(self.name).map_err(|_| McpError::InvalidResponse)?,
+            entity_type: EntityType::parse(self.entity_type)
+                .map_err(|_| McpError::InvalidResponse)?,
+            score: self.score,
+            text_score: self.text_score,
+            vec_score: self.vec_score,
+        })
+    }
 }
 
 #[cfg(test)]

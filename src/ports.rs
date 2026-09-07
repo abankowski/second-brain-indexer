@@ -3,7 +3,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::domain::model::{
-    ClaimedRun, DomainError, Embedding, EntityName, GraphSnapshot, IdempotencyKey,
+    ClaimedRun, DomainError, Embedding, EntityName, EntityType, GraphSnapshot, IdempotencyKey,
     IndexedEntityState, Lease, RunId, RunTrigger, Selector, WorkAction,
 };
 
@@ -26,12 +26,44 @@ pub struct BatchWriteFailure {
     pub code: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticQueryResult {
+    pub entity_name: EntityName,
+    pub entity_type: EntityType,
+    pub score: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HybridQueryResult {
+    pub entity_name: EntityName,
+    pub entity_type: EntityType,
+    pub score: f64,
+    pub text_score: f64,
+    pub vec_score: f64,
+}
+
 #[async_trait]
 pub trait McpMemoryPort: Send + Sync {
     async fn read_graph(&self) -> Result<GraphSnapshot, McpError>;
     async fn upsert_batch(&self, items: &[VectorWrite]) -> Result<BatchWriteResult, McpError>;
     async fn delete(&self, entity_name: &EntityName) -> Result<(), McpError>;
     async fn vector_dimension(&self) -> Result<u32, McpError>;
+    async fn semantic_search(
+        &self,
+        _embedding: &Embedding,
+        _entity_type: Option<&EntityType>,
+        _limit: Option<u32>,
+    ) -> Result<Vec<SemanticQueryResult>, McpError> {
+        Err(McpError::InvalidResponse)
+    }
+    async fn hybrid_search(
+        &self,
+        _embedding: &Embedding,
+        _query_text: &str,
+        _limit: Option<u32>,
+    ) -> Result<Vec<HybridQueryResult>, McpError> {
+        Err(McpError::InvalidResponse)
+    }
 }
 
 #[async_trait]

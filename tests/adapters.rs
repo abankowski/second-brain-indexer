@@ -13,8 +13,11 @@ use second_brain_indexer::{
         openai::OpenAiEmbeddingAdapter,
     },
     config::{EmbeddingConfig, EmbeddingEngine, McpConfig, McpTransport},
-    domain::model::{DeletionProof, Dimension, Embedding, EntityName},
-    ports::{EmbeddingError, EmbeddingProvider, McpMemoryPort, VectorWrite},
+    domain::model::{DeletionProof, Dimension, Embedding, EntityName, EntityType},
+    ports::{
+        EmbeddingError, EmbeddingProvider, HybridQueryResult, McpError, McpMemoryPort,
+        SemanticQueryResult, VectorWrite,
+    },
 };
 use secrecy::SecretString;
 use serde_json::{Value, json};
@@ -106,6 +109,24 @@ fn mcp_json_response(id: Value, text: Value) -> Response<Body> {
         .expect("JSON-RPC test response is valid")
 }
 
+fn mcp_tool_error_response(id: Value) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": "fixture tool error"}],
+                    "isError": true,
+                },
+            })
+            .to_string(),
+        ))
+        .expect("JSON-RPC test response is valid")
+}
+
 async fn mcp_handler(
     State(requests): State<RecordedRequests>,
     headers: HeaderMap,
@@ -139,6 +160,44 @@ async fn mcp_handler(
             };
             mcp_json_response(body["id"].clone(), payload)
         }
+        _ => Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::empty())
+            .expect("bad request response is valid"),
+    }
+}
+
+async fn mcp_query_handler(
+    State(requests): State<RecordedRequests>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response<Body> {
+    record(headers, body.clone(), &requests).await;
+    match body["method"].as_str() {
+        Some("initialize") => Response::builder()
+            .header("mcp-session-id", "session-query")
+            .body(Body::from(
+                json!({"jsonrpc":"2.0", "id":body["id"], "result":{}}).to_string(),
+            ))
+            .expect("initialize response is valid"),
+        Some("notifications/initialized") => Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .body(Body::empty())
+            .expect("notification response is valid"),
+        Some("tools/call") => match body["params"]["name"].as_str() {
+            Some("vector_search_entities") => mcp_json_response(
+                body["id"].clone(),
+                json!({"results":[{"name":"fixture-semantic","entityType":"Projekt","score":0.75}],"count":1}),
+            ),
+            Some("hybrid_search") => mcp_json_response(
+                body["id"].clone(),
+                json!({"results":[{"name":"fixture-hybrid","entityType":"Projekt","score":0.8,"textScore":0.7,"vecScore":0.9}],"count":1}),
+            ),
+            _ => Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .expect("bad request response is valid"),
+        },
         _ => Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .body(Body::empty())
@@ -210,6 +269,123 @@ async fn mcp_adapter_negotiates_session_and_sends_typed_tool_requests() {
             .iter()
             .all(|request| request.session_id.as_deref() == Some("session-1"))
     );
+}
+
+#[tokio::test]
+async fn mcp_adapter_normalizes_semantic_and_hybrid_query_fixtures() {
+    let requests = RecordedRequests::default();
+    let endpoint = serve(
+        Router::new()
+            .route("/", post(mcp_query_handler))
+            .with_state(requests.clone()),
+    )
+    .await;
+    let adapter = StreamableHttpMcpAdapter::new(&mcp_config(endpoint)).expect("adapter builds");
+    let embedding = Embedding::new(
+        vec![0.0; 2],
+        Dimension::parse(2).expect("test dimension is valid"),
+    )
+    .expect("embedding is valid");
+    let entity_type = EntityType::parse("Projekt".to_owned()).expect("type is valid");
+
+    let semantic = adapter
+        .semantic_search(&embedding, Some(&entity_type), Some(2))
+        .await
+        .expect("semantic result normalizes");
+    let hybrid = adapter
+        .hybrid_search(&embedding, "fixture query", Some(2))
+        .await
+        .expect("hybrid result normalizes");
+
+    assert_eq!(
+        semantic,
+        vec![SemanticQueryResult {
+            entity_name: EntityName::parse("fixture-semantic".to_owned()).expect("name is valid"),
+            entity_type: EntityType::parse("Projekt".to_owned()).expect("type is valid"),
+            score: 0.75,
+        }]
+    );
+    assert_eq!(
+        hybrid,
+        vec![HybridQueryResult {
+            entity_name: EntityName::parse("fixture-hybrid".to_owned()).expect("name is valid"),
+            entity_type: EntityType::parse("Projekt".to_owned()).expect("type is valid"),
+            score: 0.8,
+            text_score: 0.7,
+            vec_score: 0.9,
+        }]
+    );
+    let requests = requests.0.lock().await;
+    assert_eq!(requests[2].body["params"]["name"], "vector_search_entities");
+    assert_eq!(
+        requests[2].body["params"]["arguments"],
+        json!({
+            "embedding": [0.0, 0.0],
+            "entityType": "Projekt",
+            "topK": 2,
+        })
+    );
+    assert_eq!(requests[3].body["params"]["name"], "hybrid_search");
+    assert_eq!(
+        requests[3].body["params"]["arguments"],
+        json!({
+            "queryEmbedding": [0.0, 0.0],
+            "queryText": "fixture query",
+            "topK": 2,
+        })
+    );
+}
+
+#[tokio::test]
+async fn mcp_adapter_rejects_malformed_query_results_and_tool_errors() {
+    async fn handler(Json(body): Json<Value>) -> Response<Body> {
+        match body["method"].as_str() {
+            Some("initialize") => Response::builder()
+                .header("mcp-session-id", "session-query-errors")
+                .body(Body::from(
+                    json!({"jsonrpc":"2.0", "id":body["id"], "result":{}}).to_string(),
+                ))
+                .expect("initialize response is valid"),
+            Some("notifications/initialized") => Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .body(Body::empty())
+                .expect("notification response is valid"),
+            Some("tools/call") => match body["params"]["name"].as_str() {
+                Some("vector_search_entities") => mcp_json_response(
+                    body["id"].clone(),
+                    json!({"results":[{"name":"fixture","entityType":"Projekt","score":"not-a-number"}],"count":1}),
+                ),
+                Some("hybrid_search") => mcp_tool_error_response(body["id"].clone()),
+                _ => Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::empty())
+                    .expect("bad request response is valid"),
+            },
+            _ => Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .expect("bad request response is valid"),
+        }
+    }
+
+    let endpoint = serve(Router::new().route("/", post(handler))).await;
+    let adapter = StreamableHttpMcpAdapter::new(&mcp_config(endpoint)).expect("adapter builds");
+    let embedding = Embedding::new(
+        vec![0.0; 2],
+        Dimension::parse(2).expect("test dimension is valid"),
+    )
+    .expect("embedding is valid");
+
+    assert!(matches!(
+        adapter.semantic_search(&embedding, None, None).await,
+        Err(McpError::InvalidResponse)
+    ));
+    assert!(matches!(
+        adapter
+            .hybrid_search(&embedding, "fixture query", None)
+            .await,
+        Err(McpError::InvalidResponse)
+    ));
 }
 
 #[tokio::test]
