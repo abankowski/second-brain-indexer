@@ -66,7 +66,7 @@ All tests should pass before installation. The test suite does not contact your 
 
 ## Quick local smoke test (no systemd or nginx)
 
-Use this when you want to start the executable directly from your shell before setting up the VM service. It starts on the `server.bind` address from the config (the template uses `127.0.0.1:9184`). It contacts MCP at startup to verify the vector dimension, but does not create embeddings or write vectors until you submit an indexing request.
+Use this when you want to start the executable directly from your shell before setting up the VM service. It starts on the `server.bind` address from the config (the template uses `127.0.0.1:9184`). It contacts MCP at startup to verify the vector dimension and asks the configured provider for one probe embedding, but does not read the graph or write vectors until you submit an indexing request.
 
 Build the release binary, then make a local copy of the template:
 
@@ -99,7 +99,7 @@ set +a
 target/release/second-brain-indexer --config .local/config.toml
 ```
 
-Direct shell runs print readable INFO messages to standard error: configuration accepted, MCP session/dimension verification, then `indexer ready` with its listener and polling state. This startup probe does **not** list MCP tools, read the graph, create embeddings, or write vectors. Leave that terminal running. In a second terminal, set the local API token and check readiness without nginx:
+Direct shell runs print readable INFO messages to standard error: configuration accepted, MCP session/dimension verification, then `indexer ready` with its listener and polling state. This startup probe creates exactly one provider embedding to check its dimension; it does **not** list MCP tools, read the graph, or write vectors. Leave that terminal running. In a second terminal, set the local API token and check readiness without nginx:
 
 ```bash
 read -r -s -p "Indexer API token: " INDEXER_API_TOKEN; echo
@@ -254,11 +254,12 @@ For the standard OpenAI endpoint, set `embedding.provider = "openai-compatible"`
 
 Changing a provider, model, or dimension changes the embedding space. Old and new vectors must never coexist. This is a coordinated maintenance operation owned by the `mcp-memory` operator; the indexer neither deletes nor rebuilds that database.
 
-1. Stop the indexer and pause callers that could enqueue scans.
+1. Stop the indexer and pause callers that could enqueue scans. Before the maintenance restart, set `polling.enabled = false` in `config.toml`; this prevents the scheduler from queuing a competing run before the exclusive reset.
 2. Rebuild the mcp-memory vector store for 1024 dimensions, using that deployment's documented rebuild procedure. This removes the old vector index; do not attempt to preserve 384-dimensional vectors.
 3. Run the mcp-memory read-only vector-store check and proceed only when it reports `dims: 1024` and an empty/rebuilt vector index. This is the migration gate: the indexer refuses to bind when its configured, provider-probed, and MCP dimensions differ.
-4. Replace `[embedding]` with the native Ollama `bge-m3` example in `config.toml`, remove `OPENAI_API_KEY` from the service secret file, then restart the service. Confirm the journal records matching configured and MCP dimensions before continuing.
-5. Trigger exactly one full reindex and poll its run to a final state. The full scan is required because every entity needs a new BGE-M3 vector.
+4. Replace `[embedding]` with the native Ollama `bge-m3` example in `config.toml`, remove `OPENAI_API_KEY` from the service secret file, and restart the service with `polling.enabled = false`. Confirm the journal records matching configured and MCP dimensions before continuing.
+5. Reset the indexer's **local** index state with the authenticated reset endpoint below, then poll the returned run to a final state. A plain `POST /indexer/fullscan` is not sufficient after an external vector-store rebuild: unchanged entities have unchanged content hashes, so the full-scan planner skips them.
+6. Restore your normal `polling.enabled` value and restart the service only after the reset run succeeds.
 
 ### Run the migration gate
 
@@ -358,16 +359,44 @@ rm -f "$MCP_RESPONSE_FILE"
 
 Accept the gate only when the decoded payload has `"dims":1024` and `"embeddingCount":0`, for example `{"dims":1024,"embeddingCount":0}` (additional fields are allowed). An empty/rebuilt index is expected before the full reindex; any other dimension or a non-empty old index means stop and correct the rebuild.
 
-The commands below are identical in Bash and Fish after `INDEXER_API_TOKEN` is set with the shell-specific secure prompt shown above:
+`POST /indexer/reset-local-index-state` clears only the indexer's local SQLite `entity_index_state`, then atomically queues one durable full run. It does **not** rebuild, delete, or write the mcp-memory graph or vector database; step 2 remains the operator-owned external rebuild. It requires configured indexer bearer authentication and is intentionally unavailable when API bearer authentication is disabled.
 
-```text
+The request body must be exactly `{}` and every request needs a new `Idempotency-Key`. Repeating the same key safely returns the original run instead of clearing state again. Do not retry with a different key while the first request's outcome is unknown: first poll the returned run or repeat the same key.
+
+In **Bash**, create one idempotency key, submit the reset, extract the durable run ID, and verify its current status:
+
+```bash
+RESET_KEY="$(openssl rand -hex 16)"
+RESET_RESPONSE="$(curl --fail-with-body \
+  -H "Authorization: Bearer $INDEXER_API_TOKEN" \
+  -H "Idempotency-Key: $RESET_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{}' \
+  -X POST https://indexer.example.com/indexer/reset-local-index-state)"
+RESET_RUN_ID="$(printf '%s' "$RESET_RESPONSE" | jq -er '.runId')"
 curl --fail-with-body -H "Authorization: Bearer $INDEXER_API_TOKEN" \
-  -X POST https://indexer.example.com/indexer/fullscan
-curl --fail-with-body -H "Authorization: Bearer $INDEXER_API_TOKEN" \
-  https://indexer.example.com/indexer/runs/YOUR-RUN-ID
+  "https://indexer.example.com/indexer/runs/$RESET_RUN_ID"
 ```
 
-Do not use an incremental entity reindex as a substitute for this migration. If the provider probe or MCP dimension check fails, leave the service stopped and correct the configuration or vector-store rebuild before retrying.
+<details>
+<summary>Using Fish instead of Bash?</summary>
+
+```fish
+set RESET_KEY (openssl rand -hex 16)
+set RESET_RESPONSE (curl --fail-with-body \
+  -H "Authorization: Bearer $INDEXER_API_TOKEN" \
+  -H "Idempotency-Key: $RESET_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{}' \
+  -X POST https://indexer.example.com/indexer/reset-local-index-state)
+set RESET_RUN_ID (printf '%s' "$RESET_RESPONSE" | jq -er '.runId')
+curl --fail-with-body -H "Authorization: Bearer $INDEXER_API_TOKEN" \
+  "https://indexer.example.com/indexer/runs/$RESET_RUN_ID"
+```
+
+</details>
+
+Accept the migration only when that run reaches `succeeded` with every intended entity indexed. Do not use an incremental entity reindex or a plain full scan as a substitute for the reset. If the provider probe or MCP dimension check fails, leave the service stopped and correct the configuration or vector-store rebuild before retrying.
 
 ## Indexer MCP for semantic search and orchestration
 
@@ -404,6 +433,6 @@ Deployment is manual: open **Actions → Deploy**, choose the protected environm
 | `zero size shared memory zone "indexer_api"` from nginx | Create `/etc/nginx/conf.d/second-brain-indexer-rate-limit.conf` in the `http` scope with `limit_req_zone $binary_remote_addr zone=indexer_api:10m rate=10r/m;`, then rerun `sudo nginx -t`. |
 | `401` from the indexer | Send the configured `Authorization: Bearer` token; check the token file's owner/mode and restart the service after rotation. |
 | No vectors are deleted | Expected unless MCP provides an explicit complete-read proof. |
-| Model/dimension mismatch | Stop the indexer; rebuild the MCP vector store for the new dimension; verify it; update configuration; then run one full scan. |
+| Model/dimension mismatch | Stop the indexer; rebuild the MCP vector store for the new dimension; verify it; update configuration; then call authenticated `POST /indexer/reset-local-index-state` and poll its full run. |
 
 For operational detail, see [docs/runbook.md](docs/runbook.md).

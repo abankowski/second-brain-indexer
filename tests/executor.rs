@@ -17,8 +17,9 @@ use second_brain_indexer::{
     },
     ports::{
         BatchWriteFailure, BatchWriteResult, CompletedWork, EmbeddingError, EmbeddingProvider,
-        EnqueueOutcome, EnqueueRequest, FailedWork, McpError, McpMemoryPort, RunCompletion,
-        StageWork, StateError, StateRepository, VectorWrite,
+        EnqueueOutcome, EnqueueRequest, FailedWork, McpError, McpMemoryPort,
+        ResetLocalIndexStateRequest, RunCompletion, StageWork, StateError, StateRepository,
+        VectorWrite,
     },
 };
 use secrecy::SecretString;
@@ -222,6 +223,12 @@ impl FakeState {
 #[async_trait]
 impl StateRepository for FakeState {
     async fn enqueue(&self, _request: EnqueueRequest) -> Result<EnqueueOutcome, StateError> {
+        Err(StateError::Storage("not used by executor tests".to_owned()))
+    }
+    async fn reset_local_index_state_and_enqueue_full(
+        &self,
+        _: ResetLocalIndexStateRequest,
+    ) -> Result<EnqueueOutcome, StateError> {
         Err(StateError::Storage("not used by executor tests".to_owned()))
     }
     async fn claim_next(

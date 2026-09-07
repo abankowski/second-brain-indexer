@@ -74,6 +74,13 @@ pub trait EmbeddingProvider: Send + Sync {
 #[async_trait]
 pub trait StateRepository: Send + Sync {
     async fn enqueue(&self, request: EnqueueRequest) -> Result<EnqueueOutcome, StateError>;
+    /// Clears only this indexer's local entity bookkeeping and durably queues a
+    /// replacement full scan. Implementations must make the clear and enqueue
+    /// one transaction so a remote vector-store migration cannot strand state.
+    async fn reset_local_index_state_and_enqueue_full(
+        &self,
+        request: ResetLocalIndexStateRequest,
+    ) -> Result<EnqueueOutcome, StateError>;
     async fn claim_next(
         &self,
         owner: &str,
@@ -110,6 +117,13 @@ pub struct EnqueueRequest {
     pub selector: Selector,
     pub requested_at: OffsetDateTime,
     pub idempotency: Option<IdempotencyRequest>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResetLocalIndexStateRequest {
+    pub run_id: RunId,
+    pub requested_at: OffsetDateTime,
+    pub idempotency: IdempotencyRequest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

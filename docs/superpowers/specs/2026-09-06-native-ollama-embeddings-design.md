@@ -58,15 +58,15 @@ Changing provider, model, or dimensions changes embedding space. README must sta
 
 1. Stop the indexer.
 2. Rebuild/reconfigure mcp-memory's vector store for the target dimension.
-3. Update the indexer embedding configuration and restart; its probe must verify the new dimension.
-4. Trigger `POST /indexer/fullscan`.
-5. Verify a succeeded run and matching indexed count.
+3. Set `polling.enabled = false`, update the indexer embedding configuration, and restart; its probe must verify the new dimension without a scheduler-created competing run.
+4. Call `POST /indexer/reset-local-index-state` with an authenticated bearer token, strict `{}` body, and required `Idempotency-Key`. It atomically clears only local `entity_index_state` and queues a durable Full run; it is unavailable if API bearer authentication is disabled.
+5. Poll the returned `runId` and verify a succeeded run and matching indexed count, then restore the normal polling configuration and restart.
 
-The indexer does not delete or rewrite mcp-memory's database directly. The operator owns the mcp-memory rebuild step.
+The indexer does not delete or rewrite mcp-memory's database directly. The operator owns the mcp-memory rebuild step. The earlier plain-`POST /indexer/fullscan` migration path is superseded: the Full planner skips records whose local content hashes are unchanged, leaving an externally rebuilt vector store empty.
 
 ## Tests and gates
 
-Unit/integration tests cover tagged configuration validation, Ollama request shape, ordered batched response, all response/error classes, probe dimension mismatch before HTTP bind, unchanged OpenAI-compatible behavior, MCP initialize/tools-list, bearer authentication, semantic/hybrid delegation with no raw-vector response, queue coalescing for single/full reindexing, and status lookup. A local acceptance probe against the user's Ollama BGE-M3 instance runs only when it is reachable and checks non-empty 1024-dimensional output; it writes no vectors. Completion requires `cargo fmt --all -- --check`, strict Clippy, all tests, release build, `git diff --check`, and the local probe when available.
+Unit/integration tests cover tagged configuration validation, Ollama request shape, ordered batched response, all response/error classes, probe dimension mismatch before HTTP bind, unchanged OpenAI-compatible behavior, MCP initialize/tools-list, bearer authentication, semantic/hybrid delegation with no raw-vector response, queue coalescing for single/full reindexing, and status lookup. Reset tests cover mandatory authentication and idempotency, strict arguments, durable Full queueing, local-state-only scope, active-run refusal, and replay without a second clear. A local acceptance probe against the user's Ollama BGE-M3 instance runs only when it is reachable and checks non-empty 1024-dimensional output; it writes no vectors. Completion requires `cargo fmt --all -- --check`, strict Clippy, all tests, release build, `git diff --check`, and the local probe when available.
 
 ## Rejected alternatives
 

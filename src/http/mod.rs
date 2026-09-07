@@ -21,7 +21,10 @@ use uuid::Uuid;
 
 use crate::{
     domain::model::{EntityName, EntityType, IdempotencyKey, RunId, RunTrigger, Selector},
-    ports::{EnqueueOutcome, EnqueueRequest, IdempotencyRequest, McpMemoryPort, StateRepository},
+    ports::{
+        EnqueueOutcome, EnqueueRequest, IdempotencyRequest, McpMemoryPort,
+        ResetLocalIndexStateRequest, StateRepository,
+    },
     runtime::shutdown::Shutdown,
 };
 
@@ -112,6 +115,10 @@ impl BearerAuth {
 
     pub fn enabled(token: SecretString) -> Self {
         Self(Some(token))
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.0.is_some()
     }
 
     fn authorizes(&self, headers: &HeaderMap) -> bool {
@@ -252,13 +259,22 @@ where
         idempotency_ttl,
         shutdown,
     };
-    Router::new()
+    let router = Router::new()
         .route("/indexer/status", get(status::<S, M, Q>))
         .route("/indexer/stats", get(stats::<S, M, Q>))
         .route("/indexer/index", post(index::<S, M, Q>))
         .route("/indexer/fullscan", post(fullscan::<S, M, Q>))
         .route("/indexer/runs/{run_id}", get(run::<S, M, Q>))
-        .route("/indexer/metrics", get(metrics::<S, M, Q>))
+        .route("/indexer/metrics", get(metrics::<S, M, Q>));
+    let router = if auth.is_enabled() {
+        router.route(
+            "/indexer/reset-local-index-state",
+            post(reset_local_index_state::<S, M, Q>),
+        )
+    } else {
+        router
+    };
+    router
         .layer(middleware::from_fn_with_state(auth, require_bearer))
         .with_state(app_state)
 }
@@ -393,6 +409,93 @@ where
         RunTrigger::Fullscan,
     )
     .await
+}
+
+async fn reset_local_index_state<S, M, Q>(
+    State(app): State<AppState<S, M, Q>>,
+    request: Request,
+) -> Response
+where
+    S: StateRepository,
+    M: McpMemoryPort,
+    Q: HttpQueryPort,
+{
+    if app
+        .shutdown
+        .as_ref()
+        .is_some_and(|shutdown| !shutdown.is_accepting())
+    {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shutting_down",
+            "service is shutting down",
+        );
+    }
+    let headers = request.headers().clone();
+    let bytes = match body::to_bytes(request.into_body(), MAX_REQUEST_BYTES).await {
+        Ok(value) => value,
+        Err(_) => {
+            return error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_too_large",
+                "request body exceeds the size limit",
+            );
+        }
+    };
+    if !matches!(serde_json::from_slice::<serde_json::Value>(&bytes), Ok(serde_json::Value::Object(ref object)) if object.is_empty())
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "request body must be an empty JSON object",
+        );
+    }
+    let requested_at = OffsetDateTime::now_utc();
+    let run_id = match RunId::parse(Uuid::new_v4().to_string()) {
+        Ok(value) => value,
+        Err(_) => return unavailable(),
+    };
+    let response = EnqueueResponse::new(run_id.clone(), &Selector::Full, requested_at, false);
+    let response_value = match serde_json::to_value(&response) {
+        Ok(value) => value,
+        Err(_) => return unavailable(),
+    };
+    let idempotency =
+        match reset_idempotency_request(&headers, &response, requested_at, app.idempotency_ttl) {
+            Ok(value) => value,
+            Err(message) => {
+                return error(StatusCode::BAD_REQUEST, "invalid_idempotency_key", message);
+            }
+        };
+    match app
+        .state
+        .reset_local_index_state_and_enqueue_full(ResetLocalIndexStateRequest {
+            run_id,
+            requested_at,
+            idempotency,
+        })
+        .await
+    {
+        Ok(EnqueueOutcome::Queued { .. }) => {
+            (StatusCode::ACCEPTED, Json(response_value)).into_response()
+        }
+        Ok(EnqueueOutcome::IdempotentReplay {
+            response_status,
+            response_body_json,
+            ..
+        }) => replay(response_status, response_body_json),
+        Ok(EnqueueOutcome::IdempotencyConflict) => error(
+            StatusCode::CONFLICT,
+            "idempotency_key_reused",
+            "idempotency key was reused with a different request",
+        ),
+        Ok(EnqueueOutcome::Conflict) => error(
+            StatusCode::CONFLICT,
+            "run_in_progress",
+            "request conflicts with the current queue",
+        ),
+        Ok(EnqueueOutcome::Coalesced { .. }) | Err(_) => unavailable(),
+    }
 }
 
 async fn enqueue<S, M, Q>(
@@ -553,6 +656,36 @@ fn idempotency_request(
         response_body_json,
         expires_at: now + ttl,
     }))
+}
+
+#[derive(Serialize)]
+struct ResetCanonicalRequest {
+    operation: &'static str,
+}
+
+fn reset_idempotency_request(
+    headers: &HeaderMap,
+    response: &EnqueueResponse,
+    now: OffsetDateTime,
+    ttl: Duration,
+) -> Result<IdempotencyRequest, &'static str> {
+    let value = headers
+        .get("Idempotency-Key")
+        .ok_or("idempotency key is required")?
+        .to_str()
+        .map_err(|_| "idempotency key must be valid text")?;
+    let key =
+        IdempotencyKey::parse(value.to_owned()).map_err(|_| "idempotency key must not be blank")?;
+    Ok(IdempotencyRequest {
+        key,
+        request_hash: sha256_json(&ResetCanonicalRequest {
+            operation: "reset_local_index_state",
+        })?,
+        response_status: StatusCode::ACCEPTED.as_u16(),
+        response_body_json: serde_json::to_string(response)
+            .map_err(|_| "request could not be encoded")?,
+        expires_at: now + ttl,
+    })
 }
 
 fn sha256_json(value: &impl Serialize) -> Result<String, &'static str> {

@@ -16,7 +16,8 @@ use second_brain_indexer::{
     domain::model::{ClaimedRun, Dimension, Embedding, IndexedEntityState, Lease, RunId},
     ports::{
         CompletedWork, EmbeddingError, EmbeddingProvider, EnqueueOutcome, EnqueueRequest,
-        FailedWork, RunCompletion, StageWork, StateError, StateRepository,
+        FailedWork, ResetLocalIndexStateRequest, RunCompletion, StageWork, StateError,
+        StateRepository,
     },
     runtime::{
         bind_after_embedding_probe,
@@ -53,6 +54,15 @@ impl StateRepository for FakeState {
         Ok(EnqueueOutcome::Queued {
             run_id: request.run_id,
         })
+    }
+
+    async fn reset_local_index_state_and_enqueue_full(
+        &self,
+        _: ResetLocalIndexStateRequest,
+    ) -> Result<EnqueueOutcome, StateError> {
+        Err(StateError::Storage(
+            "reset is not modeled by this runtime fake".to_owned(),
+        ))
     }
 
     async fn claim_next(

@@ -720,6 +720,65 @@ async fn ollama_adapter_posts_ordered_batch_without_authorization() {
     assert_eq!(requests[0].body["truncate"], false);
 }
 
+#[test]
+fn ollama_adapter_rejects_base_url_userinfo() {
+    let config = ollama_embedding_config(
+        Url::parse("http://user:password@127.0.0.1:11434").expect("test URL is valid"),
+    );
+
+    assert!(matches!(
+        OllamaEmbeddingAdapter::new(&config),
+        Err(EmbeddingError::InvalidResponse)
+    ));
+}
+
+#[test]
+fn embedding_adapters_reject_an_unbounded_timeout() {
+    let openai = embedding_config(Url::parse("http://127.0.0.1:9184").expect("test URL is valid"));
+    let ollama =
+        ollama_embedding_config(Url::parse("http://127.0.0.1:11434").expect("test URL is valid"));
+
+    assert!(matches!(
+        OpenAiEmbeddingAdapter::new_with_timeout(&openai, Duration::ZERO),
+        Err(EmbeddingError::InvalidResponse)
+    ));
+    assert!(matches!(
+        OllamaEmbeddingAdapter::new_with_timeout(&ollama, Duration::ZERO),
+        Err(EmbeddingError::InvalidResponse)
+    ));
+}
+
+#[tokio::test]
+async fn embedding_adapters_time_out_stalled_provider_requests() {
+    async fn stalled_response() -> Response<Body> {
+        std::future::pending::<()>().await;
+        unreachable!("a stalled test provider never sends a response")
+    }
+
+    let timeout = Duration::from_millis(50);
+    let openai_endpoint = serve(Router::new().route("/embeddings", post(stalled_response))).await;
+    let openai =
+        OpenAiEmbeddingAdapter::new_with_timeout(&embedding_config(openai_endpoint), timeout)
+            .expect("adapter builds");
+    let ollama_endpoint = serve(Router::new().route("/api/embed", post(stalled_response))).await;
+    let ollama = OllamaEmbeddingAdapter::new_with_timeout(
+        &ollama_embedding_config(ollama_endpoint),
+        timeout,
+    )
+    .expect("adapter builds");
+
+    for adapter in [&openai as &dyn EmbeddingProvider, &ollama] {
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            adapter.embed(&["stalled request".to_owned()]),
+        )
+        .await
+        .expect("the embedding client enforces its own deadline");
+
+        assert!(matches!(result, Err(EmbeddingError::Transport)));
+    }
+}
+
 #[tokio::test]
 async fn ollama_adapter_rejects_a_response_with_the_wrong_embedding_cardinality() {
     let base_url = serve(Router::new().route(

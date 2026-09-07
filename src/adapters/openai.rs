@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode, header};
 use secrecy::{ExposeSecret, SecretString};
@@ -5,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
-    config::{EmbeddingConfig, EmbeddingEngine},
+    config::{DEFAULT_EMBEDDING_REQUEST_TIMEOUT, EmbeddingConfig, EmbeddingEngine},
     domain::model::{Dimension, Embedding},
     ports::{EmbeddingError, EmbeddingProvider},
 };
@@ -20,7 +22,18 @@ pub struct OpenAiEmbeddingAdapter {
 
 impl OpenAiEmbeddingAdapter {
     pub fn new(config: &EmbeddingConfig) -> Result<Self, EmbeddingError> {
+        Self::new_with_timeout(config, DEFAULT_EMBEDDING_REQUEST_TIMEOUT)
+    }
+
+    pub fn new_with_timeout(
+        config: &EmbeddingConfig,
+        request_timeout: Duration,
+    ) -> Result<Self, EmbeddingError> {
+        if request_timeout.is_zero() {
+            return Err(EmbeddingError::InvalidResponse);
+        }
         let client = Client::builder()
+            .timeout(request_timeout)
             .build()
             .map_err(|_| EmbeddingError::Transport)?;
         let (mut base_url, api_key) = match &config.engine {

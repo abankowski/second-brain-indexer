@@ -12,8 +12,8 @@ use crate::{
         ClaimedRun, EntityName, EntityType, IndexedEntityState, Lease, RunId, Selector, WorkAction,
     },
     ports::{
-        CompletedWork, EnqueueOutcome, EnqueueRequest, FailedWork, RunCompletion, StageWork,
-        StateError, StateRepository,
+        CompletedWork, EnqueueOutcome, EnqueueRequest, FailedWork, ResetLocalIndexStateRequest,
+        RunCompletion, StageWork, StateError, StateRepository,
     },
 };
 
@@ -150,6 +150,91 @@ impl StateRepository for SqliteStateRepository {
         }
         commit(&mut connection).await?;
         Ok(outcome)
+    }
+
+    async fn reset_local_index_state_and_enqueue_full(
+        &self,
+        request: ResetLocalIndexStateRequest,
+    ) -> Result<EnqueueOutcome, StateError> {
+        let mut connection = self.begin_immediate().await?;
+        let outcome = async {
+            let now = timestamp(request.requested_at)?;
+            sqlx::query("DELETE FROM idempotency_key WHERE expires_at <= ?")
+                .bind(&now)
+                .execute(&mut *connection)
+                .await
+                .map_err(StateError::storage)?;
+
+            let existing = sqlx::query(
+                "SELECT request_hash, run_id, response_status, response_body_json FROM idempotency_key WHERE key = ?",
+            )
+            .bind(request.idempotency.key.as_str())
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(StateError::storage)?;
+            if let Some(row) = existing {
+                return if row.get::<String, _>("request_hash") == request.idempotency.request_hash {
+                    Ok(EnqueueOutcome::IdempotentReplay {
+                        run_id: parse_run_id(row.get("run_id"))?,
+                        response_status: row.get::<i64, _>("response_status") as u16,
+                        response_body_json: row.get("response_body_json"),
+                    })
+                } else {
+                    Ok(EnqueueOutcome::IdempotencyConflict)
+                };
+            }
+
+            let busy = sqlx::query("SELECT 1 FROM run WHERE queue_state IN ('queued', 'leased') LIMIT 1")
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(StateError::storage)?
+                .is_some();
+            if busy {
+                return Ok(EnqueueOutcome::Conflict);
+            }
+
+            sqlx::query("DELETE FROM entity_index_state")
+                .execute(&mut *connection)
+                .await
+                .map_err(StateError::storage)?;
+            let enqueue = EnqueueRequest {
+                run_id: request.run_id.clone(),
+                trigger: crate::domain::model::RunTrigger::Fullscan,
+                selector: Selector::Full,
+                requested_at: request.requested_at,
+                idempotency: None,
+            };
+            insert_run(&mut connection, &enqueue, &now).await?;
+            sqlx::query(
+                "INSERT INTO idempotency_key (key, request_hash, run_id, response_status, response_body_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(request.idempotency.key.as_str())
+            .bind(&request.idempotency.request_hash)
+            .bind(request.run_id.as_str())
+            .bind(i64::from(request.idempotency.response_status))
+            .bind(&request.idempotency.response_body_json)
+            .bind(&now)
+            .bind(timestamp(request.idempotency.expires_at)?)
+            .execute(&mut *connection)
+            .await
+            .map_err(StateError::storage)?;
+            Ok(EnqueueOutcome::Queued { run_id: request.run_id })
+        }
+        .await;
+        match outcome {
+            Ok(outcome) => {
+                if let Err(error) = commit(&mut connection).await {
+                    rollback(&mut connection).await;
+                    Err(error)
+                } else {
+                    Ok(outcome)
+                }
+            }
+            Err(error) => {
+                rollback(&mut connection).await;
+                Err(error)
+            }
+        }
     }
 
     async fn claim_next(

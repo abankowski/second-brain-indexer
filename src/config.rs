@@ -13,6 +13,7 @@ use crate::{
 };
 
 const MAX_MCP_BATCH_SIZE: u16 = 1024;
+pub const DEFAULT_EMBEDDING_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub trait SecretLookup {
     fn get(&self, variable: &str) -> Option<SecretString>;
@@ -308,7 +309,14 @@ fn embedding_engine(
                 api_key: required_secret(secrets, api_key_env)?,
             })
         }
-        "ollama" if raw.api_key_env.is_none() => Ok(EmbeddingEngine::Ollama { base_url }),
+        "ollama"
+            if raw.api_key_env.is_none()
+                && base_url.username().is_empty()
+                && base_url.password().is_none() =>
+        {
+            Ok(EmbeddingEngine::Ollama { base_url })
+        }
+        "ollama" if raw.api_key_env.is_none() => Err(ConfigError::OllamaUrlUserinfoForbidden),
         "ollama" => Err(ConfigError::OllamaApiKeyForbidden),
         value => Err(ConfigError::UnsupportedEmbeddingProvider(value.to_owned())),
     }
@@ -391,6 +399,10 @@ pub enum ConfigError {
     UnsupportedEmbeddingProvider(String),
     #[error("embedding.api_key_env is not supported for the ollama provider")]
     OllamaApiKeyForbidden,
+    #[error(
+        "embedding.base_url for the ollama provider must not contain username or password credentials"
+    )]
+    OllamaUrlUserinfoForbidden,
     #[error("mcp.batch_size must be in 1..=1024, got {0}")]
     InvalidBatchSize(u16),
     #[error("required secret is unavailable: {0}")]
@@ -536,6 +548,35 @@ api_key_env = "OPENAI_API_KEY""#,
         );
 
         assert!(parse_toml(&input, &secrets()).is_err());
+    }
+    #[test]
+    fn rejects_ollama_base_url_userinfo_but_allows_openai_compatible_userinfo() {
+        let ollama = config().replace(
+            r#"model = "target-compatible-model"
+dimensions = 384
+max_input_chars = 24000
+max_input_tokens = 8192
+openai_base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY""#,
+            r#"provider = "ollama"
+model = "bge-m3"
+dimensions = 1024
+max_input_chars = 24000
+max_input_tokens = 8192
+base_url = "http://user:password@127.0.0.1:11434""#,
+        );
+
+        assert!(parse_toml(&ollama, &secrets()).is_err());
+        assert!(
+            parse_toml(
+                &config().replace(
+                    "https://api.openai.com/v1",
+                    "https://user:password@compatible.example/v1",
+                ),
+                &secrets(),
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn rejects_invalid_dimension_before_any_network_call() {

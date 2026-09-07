@@ -1,10 +1,12 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
-    config::{EmbeddingConfig, EmbeddingEngine},
+    config::{DEFAULT_EMBEDDING_REQUEST_TIMEOUT, EmbeddingConfig, EmbeddingEngine},
     domain::model::{Dimension, Embedding},
     ports::{EmbeddingError, EmbeddingProvider},
 };
@@ -18,15 +20,29 @@ pub struct OllamaEmbeddingAdapter {
 
 impl OllamaEmbeddingAdapter {
     pub fn new(config: &EmbeddingConfig) -> Result<Self, EmbeddingError> {
-        let client = Client::builder()
-            .build()
-            .map_err(|_| EmbeddingError::Transport)?;
+        Self::new_with_timeout(config, DEFAULT_EMBEDDING_REQUEST_TIMEOUT)
+    }
+
+    pub fn new_with_timeout(
+        config: &EmbeddingConfig,
+        request_timeout: Duration,
+    ) -> Result<Self, EmbeddingError> {
+        if request_timeout.is_zero() {
+            return Err(EmbeddingError::InvalidResponse);
+        }
         let mut base_url = match &config.engine {
             EmbeddingEngine::Ollama { base_url } => base_url.clone(),
             EmbeddingEngine::OpenAiCompatible { .. } => {
                 return Err(EmbeddingError::InvalidResponse);
             }
         };
+        if !base_url.username().is_empty() || base_url.password().is_some() {
+            return Err(EmbeddingError::InvalidResponse);
+        }
+        let client = Client::builder()
+            .timeout(request_timeout)
+            .build()
+            .map_err(|_| EmbeddingError::Transport)?;
         if !base_url.path().ends_with('/') {
             base_url.set_path(&format!("{}/", base_url.path()));
         }

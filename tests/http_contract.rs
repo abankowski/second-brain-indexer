@@ -17,8 +17,9 @@ use second_brain_indexer::{
     },
     ports::{
         BatchWriteResult, CompletedWork, EmbeddingError, EmbeddingProvider, EnqueueOutcome,
-        EnqueueRequest, FailedWork, HybridQueryResult, McpError, McpMemoryPort, RunCompletion,
-        SemanticQueryResult, StageWork, StateError, StateRepository, VectorWrite,
+        EnqueueRequest, FailedWork, HybridQueryResult, McpError, McpMemoryPort,
+        ResetLocalIndexStateRequest, RunCompletion, SemanticQueryResult, StageWork, StateError,
+        StateRepository, VectorWrite,
     },
     runtime::shutdown::Shutdown,
 };
@@ -61,6 +62,14 @@ impl StateRepository for FakeState {
         Ok(outcome.unwrap_or(EnqueueOutcome::Queued {
             run_id: request.run_id,
         }))
+    }
+    async fn reset_local_index_state_and_enqueue_full(
+        &self,
+        _: ResetLocalIndexStateRequest,
+    ) -> Result<EnqueueOutcome, StateError> {
+        Err(StateError::Storage(
+            "reset is not modeled by this HTTP contract fake".to_owned(),
+        ))
     }
     async fn claim_next(
         &self,

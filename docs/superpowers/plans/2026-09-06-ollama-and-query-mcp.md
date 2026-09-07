@@ -15,7 +15,7 @@
 - Do not expose provider credentials, raw vectors, entity observations, or provider response bodies in logs or MCP responses.
 - `embedding.dimensions`, provider probe dimensions, and MCP vector dimensions must be exactly equal before HTTP binds.
 - Reindex tools enqueue existing selectors; the indexer never edits mcp-memory SQLite directly.
-- Provider/model/dimension migration documentation must include MCP vector rebuild and full reindex.
+- Provider/model/dimension migration documentation must include MCP vector rebuild and the authenticated local-state reset that queues a forced full reindex; a plain fullscan skips unchanged local hashes.
 - Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets`, `cargo build --release`, and `git diff --check` before publish.
 
 ---
@@ -109,6 +109,17 @@
 - [ ] **Step 5: Read and update the Second Brain skill** with the indexer MCP endpoint/tool preference and raw-vector prohibition; validate the skill by its own prescribed check.
 - [ ] **Step 6: Run deployment/skill checks and full project gate.**
 - [ ] **Step 7: Commit** `docs: document indexer mcp and embedding migration`.
+
+### Post-implementation correction: migration reset after external vector rebuild
+
+**Why this supersedes the earlier migration path:** Task 5 described a plain full scan after rebuilding mcp-memory's vector store. That is incorrect: a Full selector still skips entities whose local `entity_index_state` content hashes are unchanged, so no replacement vectors are written.
+
+**Interfaces:**
+- `POST /indexer/reset-local-index-state` accepts exactly `{}`, requires configured bearer authentication and an `Idempotency-Key`, and returns `202` plus the durable Full `runId`.
+- It clears only local `entity_index_state`; it does not call, rebuild, delete, or directly write mcp-memory graph/vector data.
+- It is unavailable when bearer authentication is disabled. It rejects an active queued or leased run and idempotency conflicts without clearing state.
+
+**Required tests:** local-state clear plus Full queueing; queue/lease rejection preserving state; replay preserving newly indexed state; cross-operation idempotency conflict; rollback/persistence; disabled/missing/wrong authentication; strict body; and no remote MCP call in the reset handler.
 
 ## Final verification
 

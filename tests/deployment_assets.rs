@@ -51,6 +51,11 @@ fn deployment_assets_document_both_embedding_providers_and_the_1024_migration_ga
     assert!(readme.contains("indexer_reindex_entity"));
     assert!(readme.contains("indexer_reindex_all"));
     assert!(readme.contains("indexer_run_status"));
+    assert!(readme.contains("/indexer/reset-local-index-state"));
+    assert!(readme.contains("Idempotency-Key"));
+    assert!(readme.contains("entity_index_state"));
+    assert!(readme.contains("plain `POST /indexer/fullscan` is not sufficient"));
+    assert!(readme.contains("polling.enabled = false"));
 }
 
 #[test]
@@ -61,6 +66,8 @@ fn runbook_contains_a_non_destructive_preflight_before_deployment() {
     assert!(runbook.contains("MCP_MEMORY_TOKEN"));
     assert!(runbook.contains("OPENAI_API_KEY"));
     assert!(runbook.contains("503"));
+    assert!(runbook.contains("/indexer/reset-local-index-state"));
+    assert!(runbook.contains("Idempotency-Key"));
 }
 
 fn read(path: &str) -> String {
